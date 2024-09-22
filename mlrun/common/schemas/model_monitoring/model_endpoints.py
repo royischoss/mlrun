@@ -15,6 +15,7 @@
 import enum
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, NamedTuple, Optional
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field, validator
 from pydantic.main import Extra
 
 import mlrun.common.types
+from ..function import Function
 
 from ..object import ObjectKind, ObjectSpec, ObjectStatus
 from .constants import (

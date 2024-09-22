@@ -40,6 +40,8 @@ import mlrun.runtimes.base
 import mlrun.runtimes.nuclio.api_gateway
 import mlrun.utils.helpers
 import tests.conftest
+from mlrun.common.schemas.function import Function
+from server.api.api.endpoints.model_monitoring import list_model_monitoring_functions
 
 
 @pytest.fixture()
@@ -2409,3 +2411,20 @@ class TestModelMonitoring:
         assert (
             mock.call_args_list[0].args[0] == mm_consts.MonitoringFunctionNames.list()
         ), "Expected to wait for the infra functions"
+
+    @staticmethod
+    @unittest.mock.patch.object(mlrun.db.nopdb.NopDB, "list_model_monitoring_functions")
+    def test_list_model_monitoring_functions_v2(patched_list_model_monitoring_functions_v2, context):
+        patched_list_model_monitoring_functions_v2.return_value = [
+                    {"model_monitoring_func_0": Function()},
+                    {"model_monitoring_func_1": Function()},
+                    {"model_monitoring_func_2": Function()},
+                 ]
+
+
+        project_name = "project-name"
+        project = mlrun.new_project(project_name, context=str(context), save=False)
+        functions = project.list_model_monitoring_functions_v2()
+        for i, func_dic in enumerate(functions):
+            keys = list(func_dic.keys())
+            assert  f"model_monitoring_func_{i}" == keys[0]

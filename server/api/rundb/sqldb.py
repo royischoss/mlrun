@@ -1212,6 +1212,15 @@ class SQLRunDB(RunDBInterface):
     def list_alert_templates(self):
         pass
 
+    def list_model_monitoring_functions(
+            self,
+            project: str,
+            name: str = None,
+            tag: str = None,
+            labels: str = None,
+    ):
+        pass
+
 
 # Once this file is imported it will override the default RunDB implementation (RunDBContainer)
 @containers.override(mlrun.db.factory.RunDBContainer)

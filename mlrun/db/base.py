@@ -932,3 +932,13 @@ class RunDBInterface(ABC):
         replace_creds: bool,
     ) -> None:
         pass
+
+    @abstractmethod
+    def list_model_monitoring_functions(
+            self,
+            project: str,
+            name: str = None,
+            tag: str = None,
+            labels: str = None,
+    ):
+        pass

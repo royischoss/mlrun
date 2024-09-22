@@ -359,3 +359,41 @@ def set_model_monitoring_credentials(
         tsdb_connection=tsdb_connection,
         replace_creds=replace_creds,
     )
+
+
+@router.get(
+    "/list-model-monitoring-functions",
+    responses={
+        http.HTTPStatus.ACCEPTED.value: {
+            "model_monitoring_functions": list
+        },
+    },
+)
+def list_model_monitoring_functions(
+    commons: Annotated[_CommonParams, Depends(_common_parameters)],
+    response: fastapi.Response,
+    name: str = None,
+    tag: str = None,
+    labels: str = None,
+) -> list[dict]:
+    """
+    Get the list of model monitoring functions for commons.project.
+    :param commons: The common parameters of the request.
+    :param name:    Return only functions with a specific name.
+    :param tag:     Return function versions with specific tags.
+    :param labels:  Return functions that have specific labels assigned to them.
+    :param response: restapi Response object.
+    :return: list of model monitoring functions str representations.
+    """
+    functions = MonitoringDeployment(
+        project=commons.project,
+        auth_info=commons.auth_info,
+        db_session=commons.db_session,
+        model_monitoring_access_key=commons.model_monitoring_access_key,
+    ).list_model_monitoring_functions(
+        name=name,
+        tag=tag,
+        labels=labels,
+    )
+    response.status_code = http.HTTPStatus.ACCEPTED.value
+    return functions

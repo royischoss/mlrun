@@ -1277,6 +1277,31 @@ class HTTPRunDB(RunDBInterface):
         responses = self.paginated_api_call("GET", path, error, params=params)
         return self.process_paginated_responses(responses, "funcs")
 
+    def list_model_monitoring_functions(
+        self,
+        project: str,
+        name: str = None,
+        tag: str = None,
+        labels: str = None,
+    ):
+        """
+        Retrieve a list of functions belonging to a specific project.
+        :return: list of function objects (as dictionary).
+        """
+        project = project or config.default_project
+        response = self.api_call(
+            method=mlrun.common.types.HTTPMethod.GET,
+            path=f"projects/{project}/model-monitoring/list-model-monitoring-functions",
+            params={"name": name, "tag": tag, "labels": labels},
+        )
+        model_monitoring_functions = []
+        if response:
+            model_monitoring_functions =  response.json().get("model_monitoring_functions", []) \
+                if response.status_code == http.HTTPStatus.ACCEPTED else []
+        return model_monitoring_functions
+
+
+
     def list_runtime_resources(
         self,
         project: Optional[str] = None,

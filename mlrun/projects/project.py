@@ -3909,6 +3909,28 @@ class MlrunProject(ModelObj):
             labels=model_monitoring_labels_list,
         )
 
+    def list_model_monitoring_functions_v2(
+        self,
+        name: Optional[str] = None,
+        tag: Optional[str] = None,  # allow same input as the original method
+        labels: Optional[list[str]] = None,
+    ) -> Optional[list]:
+
+        """
+        Retrieve a list of all the model monitoring functions.
+        Example::
+
+            functions = project.list_model_monitoring_functions()
+
+        :param name:    Return only functions with a specific name.
+        :param tag:     Return function versions with specific tags.
+        :param labels:  Return functions that have specific labels assigned to them.
+
+        :returns: List of function objects.
+        """
+        db = mlrun.db.get_run_db(secrets=self._secrets)
+        return db.list_model_monitoring_functions(project=self.name, name=name, tag=tag, labels=labels)
+
     def list_runs(
         self,
         name: Optional[str] = None,

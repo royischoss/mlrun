@@ -641,15 +641,23 @@ class MonitoringDeployment:
 
         store_connector.create_tables()
 
-    def list_model_monitoring_functions(self) -> list:
+    def list_model_monitoring_functions(
+        self,
+        name: str = None,
+        tag: str = None,
+        labels: str = None,
+    ) -> list:
         """Retrieve a list of all the model monitoring functions."""
         model_monitoring_labels_list = [
             f"{mm_constants.ModelMonitoringAppLabel.KEY}={mm_constants.ModelMonitoringAppLabel.VAL}"
         ]
+        model_monitoring_labels_list += labels or []
         return server.api.crud.Functions().list_functions(
             db_session=self.db_session,
             project=self.project,
             labels=model_monitoring_labels_list,
+            name=name,
+            tag=tag,
         )
 
     async def disable_model_monitoring(

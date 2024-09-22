@@ -791,3 +791,12 @@ class NopDB(RunDBInterface):
 
     def list_alert_templates(self):
         pass
+
+    def list_model_monitoring_functions(
+            self,
+            project: str,
+            name: str = None,
+            tag: str = None,
+            labels: str = None,
+    ):
+        pass
