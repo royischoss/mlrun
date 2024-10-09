@@ -217,8 +217,37 @@ class TDEngineConnector(TSDBConnector):
             after="ProcessBeforeTDEngine",
         )
 
-    def handle_model_error(self, graph, **kwargs) -> None:
-        pass
+    def handle_model_error(
+        self,
+        graph,
+        tsdb_batching_max_events: int = 1000,
+        tsdb_batching_timeout_secs: int = 30,
+        **kwargs,
+    ) -> None:
+        graph.add_step(
+            "mlrun.model_monitoring.db.tsdb.tdengine.stream_graph_steps.ErrorExtractor",
+            name="error_extractor",
+            after="ForwardError",
+        )
+        graph.add_step(
+            "storey.TDEngineTarget",
+            name="tsdb_error",
+            after="error_extractor",
+            url=self._tdengine_connection_string,
+            supertable=mm_schemas.TDEngineSuperTables.ERRORS,
+            table_col=mm_schemas.EventFieldType.TABLE_COLUMN,
+            time_col=mm_schemas.EventFieldType.TIME,
+            database=self.database,
+            columns=[
+                mm_schemas.EventFieldType.MODEL_ERROR,
+            ],
+            tag_cols=[
+                # mm_schemas.EventFieldType.PROJECT, # TODO: roy check about project tag need?
+                mm_schemas.EventFieldType.ENDPOINT_ID,
+            ],
+            max_events=tsdb_batching_max_events,
+            flush_after_seconds=tsdb_batching_timeout_secs,
+        )
 
     def delete_tsdb_resources(self):
         """
@@ -319,7 +348,7 @@ class TDEngineConnector(TSDBConnector):
             timestamp_column=timestamp_column,
             database=self.database,
             group_by=group_by,
-            preform_agg_funcs_columns=preform_agg_columns
+            preform_agg_funcs_columns=preform_agg_columns,
         )
         logger.debug("Querying TDEngine", query=full_query)
         try:
@@ -490,12 +519,15 @@ class TDEngineConnector(TSDBConnector):
             table=mm_schemas.TDEngineSuperTables.APP_RESULTS,
             start=start,
             end=end,
-            columns=[mm_schemas.ResultData.RESULT_STATUS, mm_schemas.SchedulingKeys.ENDPOINT_ID],
+            columns=[
+                mm_schemas.ResultData.RESULT_STATUS,
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            ],
             filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
             timestamp_column=mm_schemas.WriterEvent.END_INFER_TIME,
             agg_funcs=["max"],
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
-            preform_agg_columns=[mm_schemas.ResultData.RESULT_STATUS]
+            preform_agg_columns=[mm_schemas.ResultData.RESULT_STATUS],
         )
         if not df.empty:
             df.dropna(inplace=True)
@@ -517,11 +549,17 @@ class TDEngineConnector(TSDBConnector):
             table=mm_schemas.TDEngineSuperTables.METRICS,
             start=start,
             end=end,
-            columns=[mm_schemas.ApplicationEvent.APPLICATION_NAME, mm_schemas.MetricData.METRIC_NAME,
-                     mm_schemas.SchedulingKeys.ENDPOINT_ID],
+            columns=[
+                mm_schemas.ApplicationEvent.APPLICATION_NAME,
+                mm_schemas.MetricData.METRIC_NAME,
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            ],
             filter_query=f"endpoint_id='{endpoint_id}'",
             timestamp_column=mm_schemas.WriterEvent.END_INFER_TIME,
-            group_by=[mm_schemas.WriterEvent.APPLICATION_NAME, mm_schemas.MetricData.METRIC_NAME],
+            group_by=[
+                mm_schemas.WriterEvent.APPLICATION_NAME,
+                mm_schemas.MetricData.METRIC_NAME,
+            ],
             agg_funcs=["last"],
         )
         if not df.empty:
@@ -530,12 +568,11 @@ class TDEngineConnector(TSDBConnector):
                 columns={
                     f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
                     f"last({mm_schemas.MetricData.METRIC_NAME})": mm_schemas.MetricData.METRIC_NAME,
-                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID
+                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
                 },
                 inplace=True,
             )
         return df
-
 
     def get_results_metadata(
         self,
@@ -547,13 +584,20 @@ class TDEngineConnector(TSDBConnector):
             table=mm_schemas.TDEngineSuperTables.APP_RESULTS,
             start=start,
             end=end,
-            columns=[mm_schemas.ApplicationEvent.APPLICATION_NAME, mm_schemas.ResultData.RESULT_NAME
-                ,mm_schemas.ResultData.RESULT_KIND, mm_schemas.SchedulingKeys.ENDPOINT_ID],
+            columns=[
+                mm_schemas.ApplicationEvent.APPLICATION_NAME,
+                mm_schemas.ResultData.RESULT_NAME,
+                mm_schemas.ResultData.RESULT_KIND,
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            ],
             filter_query=f"endpoint_id='{endpoint_id}'",
             timestamp_column=mm_schemas.WriterEvent.END_INFER_TIME,
-            group_by=[mm_schemas.WriterEvent.APPLICATION_NAME, mm_schemas.ResultData.RESULT_NAME],
+            group_by=[
+                mm_schemas.WriterEvent.APPLICATION_NAME,
+                mm_schemas.ResultData.RESULT_NAME,
+            ],
             agg_funcs=["last"],
-            )
+        )
         if not df.empty:
             df.dropna(inplace=True)
             df.rename(
@@ -561,7 +605,7 @@ class TDEngineConnector(TSDBConnector):
                     f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
                     f"last({mm_schemas.ResultData.RESULT_NAME})": mm_schemas.ResultData.RESULT_NAME,
                     f"last({mm_schemas.ResultData.RESULT_KIND})": mm_schemas.ResultData.RESULT_KIND,
-                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID
+                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
                 },
                 inplace=True,
             )
@@ -588,18 +632,19 @@ class TDEngineConnector(TSDBConnector):
             table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
             start=start,
             end=end,
-            columns=[mm_schemas.EventFieldType.LATENCY, mm_schemas.SchedulingKeys.ENDPOINT_ID],
+            columns=[
+                mm_schemas.EventFieldType.LATENCY,
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            ],
             agg_funcs=["avg"],
             filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
-            preform_agg_columns=[mm_schemas.EventFieldType.LATENCY]
+            preform_agg_columns=[mm_schemas.EventFieldType.LATENCY],
         )
         if not df.empty:
             df.dropna(inplace=True)
             df.rename(
-                columns={
-                    f"avg({mm_schemas.EventFieldType.LATENCY})": "avg_latency"
-                },
+                columns={f"avg({mm_schemas.EventFieldType.LATENCY})": "avg_latency"},
                 inplace=True,
             )
         return df

@@ -201,11 +201,20 @@ class TDEngineSchema:
             if interval:
                 query.write("_wstart, _wend, ")
             if agg_funcs:
-                preform_agg_funcs_columns = columns_to_filter if preform_agg_funcs_columns is None else preform_agg_funcs_columns
+                preform_agg_funcs_columns = (
+                    columns_to_filter
+                    if preform_agg_funcs_columns is None
+                    else preform_agg_funcs_columns
+                )
                 query.write(
                     ", ".join(
-                        [f"{a}({col})" if col in preform_agg_funcs_columns else f"{col}" for a in agg_funcs for col
-                         in columns_to_filter]
+                        [
+                            f"{a}({col})"
+                            if col in preform_agg_funcs_columns
+                            else f"{col}"
+                            for a in agg_funcs
+                            for col in columns_to_filter
+                        ]
                     )
                 )
             elif columns_to_filter:
