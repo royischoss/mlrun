@@ -21,8 +21,6 @@ from mlrun.common.schemas.model_monitoring import (
     EventKeyMetrics,
 )
 from mlrun.utils import logger
-from tests.api.api.test_datastore_profiles import project
-
 
 class ProcessBeforeTDEngine(mlrun.feature_store.steps.MapClass):
     def __init__(self, **kwargs):
