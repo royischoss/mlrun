@@ -531,15 +531,15 @@ class TDEngineConnector(TSDBConnector):
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
             preform_agg_columns=[mm_schemas.EventFieldType.TIME],
         )
+        df.rename(
+            columns={
+                f"last({mm_schemas.EventFieldType.TIME})": mm_schemas.EventFieldType.LAST_REQUEST,
+                f"{mm_schemas.EventFieldType.LATENCY}": "last_latency",
+            },
+            inplace=True,
+        )
         if not df.empty:
             df.dropna(inplace=True)
-            df.rename(
-                columns={
-                    f"last({mm_schemas.EventFieldType.TIME})": mm_schemas.EventFieldType.LAST_REQUEST,
-                    f"{mm_schemas.EventFieldType.LATENCY}": "last_latency",
-                },
-                inplace=True,
-            )
         return df
 
     def get_drift_status(
@@ -565,14 +565,14 @@ class TDEngineConnector(TSDBConnector):
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
             preform_agg_columns=[mm_schemas.ResultData.RESULT_STATUS],
         )
+        df.rename(
+            columns={
+                f"max({mm_schemas.ResultData.RESULT_STATUS})": mm_schemas.ResultData.RESULT_STATUS
+            },
+            inplace=True,
+        )
         if not df.empty:
             df.dropna(inplace=True)
-            df.rename(
-                columns={
-                    f"max({mm_schemas.ResultData.RESULT_STATUS})": mm_schemas.ResultData.RESULT_STATUS
-                },
-                inplace=True,
-            )
         return df
 
     def get_metrics_metadata(
@@ -598,16 +598,16 @@ class TDEngineConnector(TSDBConnector):
             ],
             agg_funcs=["last"],
         )
+        df.rename(
+            columns={
+                f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
+                f"last({mm_schemas.MetricData.METRIC_NAME})": mm_schemas.MetricData.METRIC_NAME,
+                f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            },
+            inplace=True,
+        )
         if not df.empty:
             df.dropna(inplace=True)
-            df.rename(
-                columns={
-                    f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
-                    f"last({mm_schemas.MetricData.METRIC_NAME})": mm_schemas.MetricData.METRIC_NAME,
-                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
-                },
-                inplace=True,
-            )
         return df
 
     def get_results_metadata(
@@ -634,17 +634,17 @@ class TDEngineConnector(TSDBConnector):
             ],
             agg_funcs=["last"],
         )
+        df.rename(
+            columns={
+                f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
+                f"last({mm_schemas.ResultData.RESULT_NAME})": mm_schemas.ResultData.RESULT_NAME,
+                f"last({mm_schemas.ResultData.RESULT_KIND})": mm_schemas.ResultData.RESULT_KIND,
+                f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            },
+            inplace=True,
+        )
         if not df.empty:
             df.dropna(inplace=True)
-            df.rename(
-                columns={
-                    f"last({mm_schemas.ApplicationEvent.APPLICATION_NAME})": mm_schemas.ApplicationEvent.APPLICATION_NAME,
-                    f"last({mm_schemas.ResultData.RESULT_NAME})": mm_schemas.ResultData.RESULT_NAME,
-                    f"last({mm_schemas.ResultData.RESULT_KIND})": mm_schemas.ResultData.RESULT_KIND,
-                    f"last({mm_schemas.SchedulingKeys.ENDPOINT_ID})": mm_schemas.SchedulingKeys.ENDPOINT_ID,
-                },
-                inplace=True,
-            )
         return df
 
     def get_error_count(
@@ -653,7 +653,29 @@ class TDEngineConnector(TSDBConnector):
         start: Union[datetime, str] = "0",
         end: Union[datetime, str] = "now",
     ) -> pd.DataFrame:
-        pass
+        endpoint_ids = (
+            endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
+        )
+        df = self._get_records(
+            table=mm_schemas.TDEngineSuperTables.ERRORS,
+            start=start,
+            end=end,
+            columns=[
+                mm_schemas.EventFieldType.MODEL_ERROR,
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            ],
+            agg_funcs=["count"],
+            filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
+            group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            preform_agg_columns=[mm_schemas.EventFieldType.MODEL_ERROR],
+        )
+        df.rename(
+            columns={f"count({mm_schemas.EventFieldType.MODEL_ERROR})": "error_count"},
+            inplace=True,
+        )
+        if not df.empty:
+            df.dropna(inplace=True)
+        return df
 
     def get_avg_latency(
         self,
@@ -677,12 +699,12 @@ class TDEngineConnector(TSDBConnector):
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
             preform_agg_columns=[mm_schemas.EventFieldType.LATENCY],
         )
+        df.rename(
+            columns={f"avg({mm_schemas.EventFieldType.LATENCY})": "avg_latency"},
+            inplace=True,
+        )
         if not df.empty:
             df.dropna(inplace=True)
-            df.rename(
-                columns={f"avg({mm_schemas.EventFieldType.LATENCY})": "avg_latency"},
-                inplace=True,
-            )
         return df
 
     # Note: this function serves as a reference for checking the TSDB for the existence of a metric.

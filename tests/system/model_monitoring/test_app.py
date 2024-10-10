@@ -171,18 +171,18 @@ class _V3IORecordsChecker:
     def _test_tsdb_record(
         cls, ep_id: str, last_request: datetime, error_count: float
     ) -> None:
-        if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
-            # V3IO TSDB
-            df: pd.DataFrame = cls._tsdb_storage.get_results_metadata(endpoint_id=ep_id)
-        else:
-            # TDEngine
-            df: pd.DataFrame = cls._tsdb_storage._get_records(
-                table=mm_constants.TDEngineSuperTables.APP_RESULTS,
-                start=datetime.now().astimezone()
-                - timedelta(minutes=10 * cls.app_interval),
-                end=datetime.now().astimezone(),
-                timestamp_column=mm_constants.WriterEvent.END_INFER_TIME,
-            )
+        # if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
+        # V3IO TSDB
+        df: pd.DataFrame = cls._tsdb_storage.get_results_metadata(endpoint_id=ep_id)
+        # else:
+        #     # TDEngine
+        #     df: pd.DataFrame = cls._tsdb_storage._get_records(
+        #         table=mm_constants.TDEngineSuperTables.APP_RESULTS,
+        #         start=datetime.now().astimezone()
+        #         - timedelta(minutes=10 * cls.app_interval),
+        #         end=datetime.now().astimezone(),
+        #         timestamp_column=mm_constants.WriterEvent.END_INFER_TIME,
+        #     )
 
         assert not df.empty, "No TSDB data"
         assert (
@@ -202,22 +202,20 @@ class _V3IORecordsChecker:
                     set(tsdb_metrics[app_name]) == app_metrics
                 ), "The TSDB saved metrics are different than expected"
 
-        if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
-            cls._logger.debug("Checking the MEP status")
-            rs_tsdb = cls._tsdb_storage.get_drift_status(endpoint_ids=ep_id)
-            cls._check_valid_tsdb_result(rs_tsdb, ep_id, "result_status", 2.0)
+        # if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
+        cls._logger.debug("Checking the MEP status")
+        rs_tsdb = cls._tsdb_storage.get_drift_status(endpoint_ids=ep_id)
+        cls._check_valid_tsdb_result(rs_tsdb, ep_id, "result_status", 2.0)
 
-            if last_request:
-                cls._logger.debug("Checking the MEP last_request")
-                lr_tsdb = cls._tsdb_storage.get_last_request(endpoint_ids=ep_id)
-                cls._check_valid_tsdb_result(
-                    lr_tsdb, ep_id, "last_request", last_request
-                )
+        if last_request:
+            cls._logger.debug("Checking the MEP last_request")
+            lr_tsdb = cls._tsdb_storage.get_last_request(endpoint_ids=ep_id)
+            cls._check_valid_tsdb_result(lr_tsdb, ep_id, "last_request", last_request)
 
-            if error_count:
-                cls._logger.debug("Checking the MEP error_count")
-                ec_tsdb = cls._tsdb_storage.get_error_count(endpoint_ids=ep_id)
-                cls._check_valid_tsdb_result(ec_tsdb, ep_id, "error_count", error_count)
+        if error_count:
+            cls._logger.debug("Checking the MEP error_count")
+            ec_tsdb = cls._tsdb_storage.get_error_count(endpoint_ids=ep_id)
+            cls._check_valid_tsdb_result(ec_tsdb, ep_id, "error_count", error_count)
 
     @classmethod
     def _check_valid_tsdb_result(
@@ -381,7 +379,7 @@ class _V3IORecordsChecker:
 class TestMonitoringAppFlow(TestMLRunSystem, _V3IORecordsChecker):
     project_name = "test-app-flow"
     # Set image to "<repo>/mlrun:<tag>" for local testing
-    image: typing.Optional[str] = None
+    image: typing.Optional[str] = "docker.io/royi313/mlrun:1.7.0"  # None
     error_count = 10
 
     @classmethod
