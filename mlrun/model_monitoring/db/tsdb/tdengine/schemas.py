@@ -216,7 +216,10 @@ class TDEngineSchema:
                     ", ".join(
                         [
                             f"{a}({col})"
-                            if col.upper() in map(str.upper, preform_agg_funcs_columns) # Case-insensitive check
+                            if col.upper()
+                            in map(
+                                str.upper, preform_agg_funcs_columns
+                            )  # Case-insensitive check
                             else f"{col}"
                             for a in agg_funcs
                             for col in columns_to_filter
@@ -242,7 +245,7 @@ class TDEngineSchema:
                     group_by = ", ".join(group_by)
                 query.write(f" GROUP BY {group_by}")
             if order_by:
-                desc = " DESC" if desc else ''
+                desc = " DESC" if desc else ""
                 query.write(f" ORDER BY {order_by}{desc}")
             if interval:
                 query.write(f" INTERVAL({interval})")
@@ -307,13 +310,14 @@ class Predictions(TDEngineSchema):
         }
         super().__init__(super_table, columns, tags, database)
 
+
 @dataclass
 class Errors(TDEngineSchema):
     def __init__(self, database: Optional[str] = None):
         super_table = mm_schemas.TDEngineSuperTables.ERRORS
         columns = {
             mm_schemas.EventFieldType.TIME: _TDEngineColumn.TIMESTAMP,
-            mm_schemas.EventFieldType.MODEL_ERROR: _TDEngineColumn.BINARY_10000
+            mm_schemas.EventFieldType.MODEL_ERROR: _TDEngineColumn.BINARY_10000,
         }
         tags = {
             mm_schemas.WriterEvent.ENDPOINT_ID: _TDEngineColumn.BINARY_64,

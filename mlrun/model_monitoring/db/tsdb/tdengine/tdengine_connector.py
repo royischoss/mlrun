@@ -517,19 +517,19 @@ class TDEngineConnector(TSDBConnector):
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
         df = self._get_records(
-        table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
-        start=start,
-        end=end,
-        columns=[
-            mm_schemas.SchedulingKeys.ENDPOINT_ID,
-            mm_schemas.EventFieldType.TIME,
-            mm_schemas.EventFieldType.LATENCY,
-        ],
-        filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
-        timestamp_column=mm_schemas.EventFieldType.TIME,
-        agg_funcs=["last"],
-        group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
-        preform_agg_columns=[mm_schemas.EventFieldType.TIME],
+            table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
+            start=start,
+            end=end,
+            columns=[
+                mm_schemas.SchedulingKeys.ENDPOINT_ID,
+                mm_schemas.EventFieldType.TIME,
+                mm_schemas.EventFieldType.LATENCY,
+            ],
+            filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
+            timestamp_column=mm_schemas.EventFieldType.TIME,
+            agg_funcs=["last"],
+            group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            preform_agg_columns=[mm_schemas.EventFieldType.TIME],
         )
         if not df.empty:
             df.dropna(inplace=True)
@@ -541,7 +541,6 @@ class TDEngineConnector(TSDBConnector):
                 inplace=True,
             )
         return df
-
 
     def get_drift_status(
         self,
