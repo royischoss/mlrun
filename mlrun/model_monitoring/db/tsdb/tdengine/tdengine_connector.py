@@ -103,6 +103,9 @@ class TDEngineConnector(TSDBConnector):
             mm_schemas.TDEngineSuperTables.PREDICTIONS: tdengine_schemas.Predictions(
                 self.database
             ),
+            mm_schemas.TDEngineSuperTables.ERRORS: tdengine_schemas.Errors(
+                self.database
+            ),
         }
 
     def create_tables(self):
@@ -298,6 +301,8 @@ class TDEngineConnector(TSDBConnector):
         timestamp_column: str = mm_schemas.EventFieldType.TIME,
         group_by: typing.Optional[Union[list[str], str]] = None,
         preform_agg_columns: typing.Optional[list] = None,
+        order_by: typing.Optional[str] = None,
+        desc: typing.Optional[bool] = None,
     ) -> pd.DataFrame:
         """
         Getting records from TSDB data collection.
@@ -323,6 +328,8 @@ class TDEngineConnector(TSDBConnector):
                                       notice that all aggregation functions provided will preform on those columns.
                                       If not provided The default behavior is to preform on all columns in columns,
                                       if an empty list was provided The aggregation won't be performed.
+        :param order_by:              The column or alias to preform ordering on the query.
+        :param desc:                  Whether or not to sort the results in descending order.
 
         :return: DataFrame with the provided attributes from the data collection.
         :raise:  MLRunInvalidArgumentError if query the provided table failed.
@@ -349,6 +356,8 @@ class TDEngineConnector(TSDBConnector):
             database=self.database,
             group_by=group_by,
             preform_agg_funcs_columns=preform_agg_columns,
+            order_by=order_by,
+            desc=desc,
         )
         logger.debug("Querying TDEngine", query=full_query)
         try:
@@ -504,7 +513,35 @@ class TDEngineConnector(TSDBConnector):
         start: Union[datetime, str] = "0",
         end: Union[datetime, str] = "now",
     ) -> pd.DataFrame:
-        pass
+        endpoint_ids = (
+            endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
+        )
+        df = self._get_records(
+        table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
+        start=start,
+        end=end,
+        columns=[
+            mm_schemas.SchedulingKeys.ENDPOINT_ID,
+            mm_schemas.EventFieldType.TIME,
+            mm_schemas.EventFieldType.LATENCY,
+        ],
+        filter_query=f"endpoint_id IN({str(endpoint_ids)[1:-1]})",
+        timestamp_column=mm_schemas.EventFieldType.TIME,
+        agg_funcs=["last"],
+        group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
+        preform_agg_columns=[mm_schemas.EventFieldType.TIME],
+        )
+        if not df.empty:
+            df.dropna(inplace=True)
+            df.rename(
+                columns={
+                    f"last({mm_schemas.EventFieldType.TIME})": mm_schemas.EventFieldType.LAST_REQUEST,
+                    f"{mm_schemas.EventFieldType.LATENCY}": "last_latency",
+                },
+                inplace=True,
+            )
+        return df
+
 
     def get_drift_status(
         self,
