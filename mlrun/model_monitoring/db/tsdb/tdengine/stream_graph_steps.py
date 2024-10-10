@@ -21,6 +21,7 @@ from mlrun.common.schemas.model_monitoring import (
     EventKeyMetrics,
 )
 from mlrun.utils import logger
+from tests.api.api.test_datastore_profiles import project
 
 
 class ProcessBeforeTDEngine(mlrun.feature_store.steps.MapClass):
@@ -55,10 +56,12 @@ class ErrorExtractor(mlrun.feature_store.steps.MapClass):
         error = event.get("error")
         timestamp = datetime.fromisoformat(event.get("when"))
         endpoint_id = event[EventFieldType.ENDPOINT_ID]
+        _project = event[EventFieldType.PROJECT]
         event = {
             EventFieldType.MODEL_ERROR: str(error),
             EventFieldType.ENDPOINT_ID: endpoint_id,
             EventFieldType.TIME: timestamp,
+            EventFieldType.PROJECT: _project
         }
         logger.info("Write error to errors TSDB table", event=event)
         return event
