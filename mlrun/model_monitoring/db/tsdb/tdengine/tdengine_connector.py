@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import typing
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Union
 
 import pandas as pd
@@ -516,6 +516,8 @@ class TDEngineConnector(TSDBConnector):
         endpoint_ids = (
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
+        start = datetime.min if start == "0" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
             start=start,
@@ -551,6 +553,9 @@ class TDEngineConnector(TSDBConnector):
         endpoint_ids = (
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
+        start = datetime.min if start == "0" else start
+        start = mlrun.utils.datetime_now() - timedelta(hours=24) if start == "now-24h" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.APP_RESULTS,
             start=start,
@@ -581,6 +586,8 @@ class TDEngineConnector(TSDBConnector):
         start: Union[datetime, str] = "0",
         end: Union[datetime, str] = "now",
     ) -> pd.DataFrame:
+        start = datetime.min if start == "0" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.METRICS,
             start=start,
@@ -616,6 +623,8 @@ class TDEngineConnector(TSDBConnector):
         start: Union[datetime, str] = "0",
         end: Union[datetime, str] = "now",
     ) -> pd.DataFrame:
+        start = datetime.min if start == "0" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.APP_RESULTS,
             start=start,
@@ -656,6 +665,8 @@ class TDEngineConnector(TSDBConnector):
         endpoint_ids = (
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
+        start = datetime.min if start == "0" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.ERRORS,
             start=start,
@@ -686,6 +697,8 @@ class TDEngineConnector(TSDBConnector):
         endpoint_ids = (
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
+        start = datetime.min if start == "0" else start
+        end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.PREDICTIONS,
             start=start,
