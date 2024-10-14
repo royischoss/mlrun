@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import typing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Union
 
 import pandas as pd
@@ -509,6 +509,8 @@ class TDEngineConnector(TSDBConnector):
             group_by=mm_schemas.SchedulingKeys.ENDPOINT_ID,
             preform_agg_columns=[mm_schemas.EventFieldType.TIME],
         )
+        if not df.empty:
+            df.dropna(inplace=True)
         df.rename(
             columns={
                 f"last({mm_schemas.EventFieldType.TIME})": mm_schemas.EventFieldType.LAST_REQUEST,
@@ -516,8 +518,11 @@ class TDEngineConnector(TSDBConnector):
             },
             inplace=True,
         )
-        if not df.empty:
-            df.dropna(inplace=True)
+        df[mm_schemas.EventFieldType.LAST_REQUEST] = df[
+            mm_schemas.EventFieldType.LAST_REQUEST
+        ].map(
+            lambda last_request: datetime.strptime(last_request, "%Y-%m-%d %H:%M:%S.%f %z").astimezone(tz=timezone.utc)
+            )
         return df
 
     def get_drift_status(
