@@ -22,6 +22,7 @@ from mlrun.common.schemas.model_monitoring import (
 )
 from mlrun.utils import logger
 
+
 class ProcessBeforeTDEngine(mlrun.feature_store.steps.MapClass):
     def __init__(self, **kwargs):
         """
@@ -59,7 +60,7 @@ class ErrorExtractor(mlrun.feature_store.steps.MapClass):
             EventFieldType.MODEL_ERROR: str(error),
             EventFieldType.ENDPOINT_ID: endpoint_id,
             EventFieldType.TIME: timestamp,
-            EventFieldType.PROJECT: _project
+            EventFieldType.PROJECT: _project,
         }
         logger.info("Write error to errors TSDB table", event=event)
         return event

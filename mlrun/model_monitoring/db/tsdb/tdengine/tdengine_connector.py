@@ -224,7 +224,7 @@ class TDEngineConnector(TSDBConnector):
                 mm_schemas.EventFieldType.MODEL_ERROR,
             ],
             tag_cols=[
-                # mm_schemas.EventFieldType.PROJECT, # TODO: roy check about project tag need?
+                mm_schemas.EventFieldType.PROJECT,
                 mm_schemas.EventFieldType.ENDPOINT_ID,
             ],
             max_events=tsdb_batching_max_events,
@@ -521,8 +521,10 @@ class TDEngineConnector(TSDBConnector):
         df[mm_schemas.EventFieldType.LAST_REQUEST] = df[
             mm_schemas.EventFieldType.LAST_REQUEST
         ].map(
-            lambda last_request: datetime.strptime(last_request, "%Y-%m-%d %H:%M:%S.%f %z").astimezone(tz=timezone.utc)
-            )
+            lambda last_request: datetime.strptime(
+                last_request, "%Y-%m-%d %H:%M:%S.%f %z"
+            ).astimezone(tz=timezone.utc)
+        )
         return df
 
     def get_drift_status(
@@ -535,7 +537,11 @@ class TDEngineConnector(TSDBConnector):
             endpoint_ids if isinstance(endpoint_ids, list) else [endpoint_ids]
         )
         start = datetime.min if start == "0" else start
-        start = mlrun.utils.datetime_now() - timedelta(hours=24) if start == "now-24h" else start
+        start = (
+            mlrun.utils.datetime_now() - timedelta(hours=24)
+            if start == "now-24h"
+            else start
+        )
         end = mlrun.utils.now_date() if end == "now" else end
         df = self._get_records(
             table=mm_schemas.TDEngineSuperTables.APP_RESULTS,

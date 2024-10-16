@@ -225,9 +225,16 @@ class _V3IORecordsChecker:
         assert (
             df.endpoint_id == ep_id
         ).all(), "The endpoint IDs are different than expected"
-        assert (
-            df[df["endpoint_id"] == ep_id][result_name].item() == result_value
-        ), f"The {result_name} is different than expected for {ep_id}"
+        if isinstance(result_value, datetime) or isinstance(result_value, pd.Timestamp):
+            # Note: We check for differences in time is less than 1 ms because this is the highest resolution we get from TDEngine
+            assert (
+                abs(df[df["endpoint_id"] == ep_id][result_name].item() - result_value)
+                < np.timedelta64(1, "ms")
+            ), f"The {result_name} is different than expected for {ep_id}, for timestamp we use TDEngine resolution that is 1 ms"
+        else:
+            assert (
+                df[df["endpoint_id"] == ep_id][result_name].item() == result_value
+            ), f"The {result_name} is different than expected for {ep_id}"
 
     @classmethod
     def _test_predictions_table(cls, ep_id: str, should_be_empty: bool = False) -> None:
@@ -379,7 +386,7 @@ class _V3IORecordsChecker:
 class TestMonitoringAppFlow(TestMLRunSystem, _V3IORecordsChecker):
     project_name = "test-app-flow"
     # Set image to "<repo>/mlrun:<tag>" for local testing
-    image: typing.Optional[str] = "docker.io/royi313/mlrun:1.7.0"  # None
+    image: typing.Optional[str] = None
     error_count = 10
 
     @classmethod
