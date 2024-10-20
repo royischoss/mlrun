@@ -319,9 +319,9 @@ class Errors(TDEngineSchema):
         columns = {
             mm_schemas.EventFieldType.TIME: _TDEngineColumn.TIMESTAMP,
             mm_schemas.EventFieldType.MODEL_ERROR: _TDEngineColumn.BINARY_10000,
-            mm_schemas.EventFieldType.PROJECT: _TDEngineColumn.BINARY_64,
         }
         tags = {
+            mm_schemas.EventFieldType.PROJECT: _TDEngineColumn.BINARY_64,
             mm_schemas.WriterEvent.ENDPOINT_ID: _TDEngineColumn.BINARY_64,
         }
         super().__init__(super_table, columns, tags, database)
