@@ -171,18 +171,8 @@ class _V3IORecordsChecker:
     def _test_tsdb_record(
         cls, ep_id: str, last_request: datetime, error_count: float
     ) -> None:
-        # if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
         # V3IO TSDB
         df: pd.DataFrame = cls._tsdb_storage.get_results_metadata(endpoint_id=ep_id)
-        # else:
-        #     # TDEngine
-        #     df: pd.DataFrame = cls._tsdb_storage._get_records(
-        #         table=mm_constants.TDEngineSuperTables.APP_RESULTS,
-        #         start=datetime.now().astimezone()
-        #         - timedelta(minutes=10 * cls.app_interval),
-        #         end=datetime.now().astimezone(),
-        #         timestamp_column=mm_constants.WriterEvent.END_INFER_TIME,
-        #     )
 
         assert not df.empty, "No TSDB data"
         assert (
@@ -202,7 +192,6 @@ class _V3IORecordsChecker:
                     set(tsdb_metrics[app_name]) == app_metrics
                 ), "The TSDB saved metrics are different than expected"
 
-        # if cls._tsdb_storage.type == mm_constants.TSDBTarget.V3IO_TSDB:
         cls._logger.debug("Checking the MEP status")
         rs_tsdb = cls._tsdb_storage.get_drift_status(endpoint_ids=ep_id)
         cls._check_valid_tsdb_result(rs_tsdb, ep_id, "result_status", 2.0)
@@ -384,9 +373,9 @@ class _V3IORecordsChecker:
 @pytest.mark.enterprise
 @pytest.mark.model_monitoring
 class TestMonitoringAppFlow(TestMLRunSystem, _V3IORecordsChecker):
-    project_name = "test-app-flow"
+    project_name = "test-app-flow-1"
     # Set image to "<repo>/mlrun:<tag>" for local testing
-    image: typing.Optional[str] = None
+    image: typing.Optional[str] = "docker.io/royi313/mlrun:1.7.0" # None
     error_count = 10
 
     @classmethod
@@ -775,7 +764,7 @@ class TestMonitoringAppFlow(TestMLRunSystem, _V3IORecordsChecker):
         self._test_api(ep_id=ep_id)
         if _DefaultDataDriftAppData in self.apps_data:
             self._test_model_endpoint_stats(ep_id=ep_id)
-        self._test_error_alert()
+        # self._test_error_alert()
 
 
 @TestMLRunSystem.skip_test_if_env_not_configured

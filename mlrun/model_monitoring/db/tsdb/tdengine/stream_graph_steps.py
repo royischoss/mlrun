@@ -55,12 +55,12 @@ class ErrorExtractor(mlrun.feature_store.steps.MapClass):
         error = event.get("error")
         timestamp = datetime.fromisoformat(event.get("when"))
         endpoint_id = event[EventFieldType.ENDPOINT_ID]
-        _project = event[EventFieldType.PROJECT]
         event = {
             EventFieldType.MODEL_ERROR: str(error),
             EventFieldType.ENDPOINT_ID: endpoint_id,
             EventFieldType.TIME: timestamp,
-            EventFieldType.PROJECT: _project,
+            EventFieldType.PROJECT: event[EventFieldType.FUNCTION_URI].split("/")[0],
+            EventFieldType.TABLE_COLUMN : "_err_" + event.get(EventFieldType.ENDPOINT_ID)
         }
         logger.info("Write error to errors TSDB table", event=event)
         return event
