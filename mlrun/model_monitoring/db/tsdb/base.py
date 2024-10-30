@@ -462,9 +462,17 @@ class TSDBConnector(ABC):
         :return:            start datetime, end datetime
         """
         if not isinstance(start, datetime):
-            start = mlrun.utils.datetime_min() if start in ["0", None] else mlrun.utils.datetime_now()
+            start = (
+                mlrun.utils.datetime_min()
+                if start in ["0", None]
+                else mlrun.utils.datetime_now()
+            )
             start = start + timedelta(hours=delta_start)
         if not isinstance(end, datetime):
-            end = mlrun.utils.datetime_min() if end in ["0"] else mlrun.utils.datetime_now()
+            end = (
+                mlrun.utils.datetime_min()
+                if end in ["0"]
+                else mlrun.utils.datetime_now()
+            )
             end = end + timedelta(hours=delta_end)
         return start, end
