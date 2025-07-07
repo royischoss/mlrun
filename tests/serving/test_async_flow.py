@@ -33,6 +33,16 @@ class _DummyStreamRaiser:
         raise ValueError("DummyStreamRaiser raises an error")
 
 
+def create_mocked_get_store_resource(model_artifact):
+    def mocked_get_store_resource(uri, **kwargs):
+        if uri == model_artifact.uri:
+            return model_artifact
+        else:
+            raise mlrun.errors.MLRunInvalidArgumentError("Artifact uri not found")
+
+    return mocked_get_store_resource
+
+
 def create_mocked_get_store_artifact(model_artifact):
     def mocked_get_store_artifact(uri, **kwargs):
         if uri == model_artifact.uri:
@@ -691,3 +701,13 @@ def test_get_local_model_path():
         assert resp["result"] == "123"
     finally:
         server.wait_for_completion()
+
+
+def test_model_runner_with_llm_model():
+    project = mlrun.new_project("llm-model-project", save=False)
+    llm_key = "my-llm"
+    llm_prompt = project.log_llm_prompt(
+        llm_key,
+        prompt_string="Q : {question}",
+        description="best-prompt",
+    )

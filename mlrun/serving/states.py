@@ -1136,6 +1136,28 @@ class Model(storey.ParallelExecutionRunnable, ModelObj):
         return None, None
 
 
+class LLMModel(Model):
+    def __init__(self, name: str, **kwargs):
+        super().__init__(name, **kwargs)
+
+    def predict(self, body: Any, prompt: str) -> Any:
+        return body
+
+    def run(self, body: Any, path: str) -> Any:
+        body, prompt = self.enrich_prompt_with_legend(body)
+        self.predict(body, prompt)
+
+    def enrich_prompt_with_legend(self, body: dict) -> tuple[dict, str]:
+        llm_prompt_artifact = self._get_artifact_object()
+        if not (llm_prompt_artifact and isinstance(llm_prompt_artifact, LLMPromptArtifact)):
+            raise MLRunInvalidArgumentError("LLMModel must be provided with LLMPromptArtifact")
+        prompt_legend = llm_prompt_artifact.spec.prompt_legend
+        prompt = llm_prompt_artifact.spec.prompt_string
+        for key, value in prompt_legend.items():
+            prompt.replace(key, body[prompt_legend["field"]])
+        return body, prompt
+
+
 class ModelSelector:
     """Used to select which models to run on each event."""
 

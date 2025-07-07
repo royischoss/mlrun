@@ -46,7 +46,7 @@ class LLMPromptArtifactSpec(ArtifactSpec):
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "Cannot specify both 'prompt_string' and 'prompt_path'"
             )
-
+        self._verify_prompt_legend(prompt_legend)
         super().__init__(
             src_path=prompt_path,
             target_path=target_path,
@@ -66,6 +66,22 @@ class LLMPromptArtifactSpec(ArtifactSpec):
     @property
     def model_uri(self):
         return self.parent_uri
+
+    @staticmethod
+    def _verify_prompt_legend(prompt_legend: dict):
+        if prompt_legend is None:
+            return True
+        for key, value in prompt_legend.items():
+            if isinstance(value, dict):
+                if value.get("field") is None:
+                    value["field"] = key
+                value["description"] = value.get("description")
+                if diff := set(value.keys()) - {"field", "description"}:
+
+                    raise mlrun.errors.MLRunInvalidArgumentError("prompt_legend values must contain only 'field' and "
+                                                                 f"'description' keys, got extra fields: {diff}")
+            else:
+                raise mlrun.errors.MLRunInvalidArgumentError(f"Wrong prompt_legend format, {key} is not mapped to dict")
 
 
 class LLMPromptArtifact(Artifact):
