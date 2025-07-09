@@ -21,6 +21,7 @@ __all__ = [
 ]
 
 import inspect
+import json
 import os
 import pathlib
 import traceback
@@ -44,7 +45,6 @@ from mlrun.datastore.datastore_profile import (
     datastore_profile_read,
 )
 from mlrun.datastore.model_provider.model_provider import ModelProvider
-from mlrun.datastore.store_resources import get_store_resource
 from mlrun.datastore.storeytargets import KafkaStoreyTarget, StreamStoreyTarget
 from mlrun.utils import logger
 
@@ -1143,19 +1143,28 @@ class LLMModel(Model):
     def predict(self, body: Any, prompt: str) -> Any:
         return body
 
+    async def predict_async(self, body: Any, prompt: str) -> Any:
+        return body
+
     def run(self, body: Any, path: str) -> Any:
         body, prompt = self.enrich_prompt_with_legend(body)
         self.predict(body, prompt)
 
-    def enrich_prompt_with_legend(self, body: dict) -> tuple[dict, str]:
+    def enrich_prompt_with_legend(self, body: dict) -> dict:
         llm_prompt_artifact = self._get_artifact_object()
-        if not (llm_prompt_artifact and isinstance(llm_prompt_artifact, LLMPromptArtifact)):
-            raise MLRunInvalidArgumentError("LLMModel must be provided with LLMPromptArtifact")
+        if not (
+            llm_prompt_artifact and isinstance(llm_prompt_artifact, LLMPromptArtifact)
+        ):
+            raise MLRunInvalidArgumentError(
+                "LLMModel must be provided with LLMPromptArtifact"
+            )
         prompt_legend = llm_prompt_artifact.spec.prompt_legend
-        prompt = llm_prompt_artifact.spec.prompt_string
-        for key, value in prompt_legend.items():
-            prompt.replace(key, body[prompt_legend["field"]])
-        return body, prompt
+        prompt = llm_prompt_artifact.spec.prompt_template
+        kwargs = {
+            place_holder: body[body_map["field"]]
+            for place_holder, body_map in prompt_legend.items()
+        }
+        return json.loads(prompt.format(**kwargs))
 
 
 class ModelSelector:

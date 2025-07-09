@@ -76,7 +76,7 @@ def test_prompt_limitation():
         description="long-prompt",
     )
     assert llm_prompt.target_path.startswith(str(artifact_path))
-    assert llm_prompt.spec.prompt_string is None
+    assert llm_prompt.spec.prompt_template is None
 
     prompt_template = llm_prompt.read_prompt()
     assert prompt_template == "A" * 2000

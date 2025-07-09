@@ -25,7 +25,7 @@ MAX_PROMPT_LENGTH = 1024
 
 class LLMPromptArtifactSpec(ArtifactSpec):
     _dict_fields = ArtifactSpec._dict_fields + [
-        "prompt_string",
+        "prompt_template",
         "prompt_legend",
         "model_configuration",
         "description",
@@ -34,7 +34,7 @@ class LLMPromptArtifactSpec(ArtifactSpec):
     def __init__(
         self,
         model_artifact: Union[model_art.ModelArtifact, str] = None,
-        prompt_string: Optional[str] = None,
+        prompt_template: Optional[str] = None,
         prompt_path: Optional[str] = None,
         prompt_legend: Optional[dict] = None,
         model_configuration: Optional[dict] = None,
@@ -42,7 +42,7 @@ class LLMPromptArtifactSpec(ArtifactSpec):
         target_path: Optional[str] = None,
         **kwargs,
     ):
-        if prompt_string and prompt_path:
+        if prompt_template and prompt_path:
             raise mlrun.errors.MLRunInvalidArgumentError(
                 "Cannot specify both 'prompt_string' and 'prompt_path'"
             )
@@ -53,11 +53,11 @@ class LLMPromptArtifactSpec(ArtifactSpec):
             parent_uri=model_artifact.uri
             if isinstance(model_artifact, model_art.ModelArtifact)
             else model_artifact,
-            body=prompt_string,
+            body=prompt_template,
             **kwargs,
         )
 
-        self.prompt_string = prompt_string
+        self.prompt_template = prompt_template
         self.prompt_legend = prompt_legend
         self.model_configuration = model_configuration
         self.description = description
@@ -71,17 +71,20 @@ class LLMPromptArtifactSpec(ArtifactSpec):
     def _verify_prompt_legend(prompt_legend: dict):
         if prompt_legend is None:
             return True
-        for key, value in prompt_legend.items():
-            if isinstance(value, dict):
-                if value.get("field") is None:
-                    value["field"] = key
-                value["description"] = value.get("description")
-                if diff := set(value.keys()) - {"field", "description"}:
-
-                    raise mlrun.errors.MLRunInvalidArgumentError("prompt_legend values must contain only 'field' and "
-                                                                 f"'description' keys, got extra fields: {diff}")
+        for place_holder, body_map in prompt_legend.items():
+            if isinstance(body_map, dict):
+                if body_map.get("field") is None:
+                    body_map["field"] = place_holder
+                body_map["description"] = body_map.get("description")
+                if diff := set(body_map.keys()) - {"field", "description"}:
+                    raise mlrun.errors.MLRunInvalidArgumentError(
+                        "prompt_legend values must contain only 'field' and "
+                        f"'description' keys, got extra fields: {diff}"
+                    )
             else:
-                raise mlrun.errors.MLRunInvalidArgumentError(f"Wrong prompt_legend format, {key} is not mapped to dict")
+                raise mlrun.errors.MLRunInvalidArgumentError(
+                    f"Wrong prompt_legend format, {place_holder} is not mapped to dict"
+                )
 
 
 class LLMPromptArtifact(Artifact):
@@ -111,7 +114,7 @@ class LLMPromptArtifact(Artifact):
         **kwargs,
     ):
         llm_prompt_spec = LLMPromptArtifactSpec(
-            prompt_string=prompt_string,
+            prompt_template=prompt_string,
             prompt_path=prompt_path,
             prompt_legend=prompt_legend,
             model_artifact=model_artifact,
@@ -153,8 +156,8 @@ class LLMPromptArtifact(Artifact):
         """
         Read the prompt string from the artifact.
         """
-        if self.spec.prompt_string:
-            return self.spec.prompt_string
+        if self.spec.prompt_template:
+            return self.spec.prompt_template
         if self.spec.target_path:
             with mlrun.datastore.store_manager.object(url=self.spec.target_path).open(
                 mode="r"
@@ -166,16 +169,16 @@ class LLMPromptArtifact(Artifact):
         Prepare the artifact before logging.
         This method is called before the artifact is logged.
         """
-        if self.spec.prompt_string and len(self.spec.prompt_string) > MAX_PROMPT_LENGTH:
+        if self.spec.prompt_template and len(self.spec.prompt_template) > MAX_PROMPT_LENGTH:
             logger.debug(
                 "Prompt string exceeds maximum length, saving to a temporary file."
             )
             with tempfile.NamedTemporaryFile(
                 delete=False, mode="w", suffix=".txt"
             ) as temp_file:
-                temp_file.write(self.spec.prompt_string)
+                temp_file.write(self.spec.prompt_template)
             self.spec.src_path = temp_file.name
-            self.spec.prompt_string = None
+            self.spec.prompt_template = None
             self._src_is_temp = True
 
         super().before_log()
