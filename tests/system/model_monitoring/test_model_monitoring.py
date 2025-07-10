@@ -606,13 +606,14 @@ class TestModelEndpointsOperations(TestMLRunSystemModelMonitoring):
             name=model_endpoint.metadata.name,
             function_name=model_endpoint.spec.function_name,
             function_tag=model_endpoint.spec.function_tag,
+            feature_analysis=True,
         )
         assert mep.spec.feature_names == ["f1"]
         assert mep.spec.label_names == ["l1"]
         assert mep.spec.model_name == "my-llm-prompt"
         assert mep.spec.model_uri == llm_prompt.get_store_url(with_tag=False)
 
-    def test_mep_with_model_runner(self, model_kind):
+    def test_mep_with_model_runner(self):
         function = mlrun.code_to_function(
             name="function_with_model",
             kind="serving",
@@ -625,10 +626,16 @@ class TestModelEndpointsOperations(TestMLRunSystemModelMonitoring):
         graph = function.set_topology("flow", engine="async")
         model_runner_step = mlrun.serving.states.ModelRunnerStep(name="model-runner")
         model_runner_step.add_model(
-            model_class="IncModel", endpoint_name="my-model-1", inc=1
+            model_class="IncModel",
+            endpoint_name="my-model-1",
+            execution_mechanism="naive",
+            inc=1,
         )
         model_runner_step.add_model(
-            model_class="IncModel", endpoint_name="my-model-2", inc=2
+            model_class="IncModel",
+            endpoint_name="my-model-2",
+            execution_mechanism="naive",
+            inc=2,
         )
         graph.to(name="echo", class_name="Echo").to(
             model_runner_step, "runner"
