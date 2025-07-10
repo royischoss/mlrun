@@ -739,7 +739,7 @@ def test_deploy_function_with_model_runner(
     if llm:
         llm_artifact = project.log_llm_prompt(
             "my_llm",
-            prompt_template="What is the meaning of life?",
+            prompt_string="What is the meaning of life?",
             model_artifact=model_artifact,
         )
 
@@ -796,13 +796,3 @@ def test_deploy_function_with_model_runner(
         assert resp["prompt"] == "What is the capital of france?"
     finally:
         server.wait_for_completion()
-
-
-def test_model_runner_with_llm_model():
-    project = mlrun.new_project("llm-model-project", save=False)
-    llm_key = "my-llm"
-    llm_prompt = project.log_llm_prompt(
-        llm_key,
-        prompt_template="Q : {question}",
-        description="best-prompt",
-    )

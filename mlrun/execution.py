@@ -963,7 +963,7 @@ class MLClientCtx:
 
         if not prompt_template and not prompt_path:
             raise mlrun.errors.MLRunInvalidArgumentError(
-                "Either 'prompt_string' or 'prompt_path' must be provided"
+                "Either 'prompt_template' or 'prompt_path' must be provided"
             )
 
         llm_prompt = LLMPromptArtifact(
