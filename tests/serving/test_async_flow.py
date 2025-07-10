@@ -739,7 +739,7 @@ def test_deploy_function_with_model_runner(
     if llm:
         llm_artifact = project.log_llm_prompt(
             "my_llm",
-            prompt_string="What is the meaning of life?",
+            prompt_template="What is the meaning of life?",
             model_artifact=model_artifact,
         )
 
@@ -803,6 +803,6 @@ def test_model_runner_with_llm_model():
     llm_key = "my-llm"
     llm_prompt = project.log_llm_prompt(
         llm_key,
-        prompt_string="Q : {question}",
+        prompt_template="Q : {question}",
         description="best-prompt",
     )

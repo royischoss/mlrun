@@ -22,7 +22,7 @@ import mlrun.artifacts
 from tests import conftest
 
 results_dir = (pathlib.Path(conftest.results) / "artifacts").absolute()
-llm_file = pathlib.Path(__file__).parent / "assets" / "prompt.txt"
+llm_file = pathlib.Path(__file__).parent / "assets" / "prompt.json"
 
 
 @pytest.mark.parametrize(
@@ -38,7 +38,7 @@ def test_prompt_target_paths(generate_target_path_from_artifact_hash, from_file)
         generate_target_path_from_artifact_hash
     )
     project_name = "project-test"
-    artifact_path = results_dir / project_name
+    artifact_path = str(results_dir / project_name)
     llm_key = "llm-prompt"
 
     context = mlrun.get_or_create_ctx("test", project=project_name)
@@ -53,13 +53,19 @@ def test_prompt_target_paths(generate_target_path_from_artifact_hash, from_file)
         llm_prompt = context.log_llm_prompt(
             llm_key,
             artifact_path=artifact_path,
-            prompt_string="Q : {question}",
+            prompt_template=[
+                {"role": "system", "content": "remarks"},
+                {"role": "user", "content": "question"},
+            ],
             description="best-prompt",
         )
     assert llm_prompt.target_path.startswith(str(artifact_path))
 
     prompt_template = llm_prompt.read_prompt()
-    assert prompt_template == "Q : {question}"
+    assert prompt_template == [
+        {"role": "system", "content": "remarks"},
+        {"role": "user", "content": "question"},
+    ]
 
 
 def test_prompt_limitation():
@@ -72,7 +78,7 @@ def test_prompt_limitation():
     llm_prompt = context.log_llm_prompt(
         llm_key,
         artifact_path=artifact_path,
-        prompt_string="A" * 2000,
+        prompt_template="A" * 2000,
         description="long-prompt",
     )
     assert llm_prompt.target_path.startswith(str(artifact_path))
@@ -109,7 +115,7 @@ def test_unauthorised_model(project_name_llm):
         context_llm.log_llm_prompt(
             llm_key,
             artifact_path=artifact_path_llm,
-            prompt_string="A" * 2000,
+            prompt_template="A" * 2000,
             description="long-prompt",
             model_artifact=model,
         )
@@ -119,7 +125,7 @@ def test_unauthorised_model(project_name_llm):
         context_llm.log_llm_prompt(
             llm_key,
             artifact_path=artifact_path_llm,
-            prompt_string="A" * 2000,
+            prompt_template="A" * 2000,
             description="long-prompt",
             model_artifact="dasdcfsfv",
         )

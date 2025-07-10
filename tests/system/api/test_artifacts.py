@@ -103,7 +103,7 @@ class TestAPIArtifacts(TestMLRunSystem):
         for i in range(3):
             self.project.log_llm_prompt(
                 f"{llm_key}-{i}",
-                prompt_string="Q : {question}",
+                prompt_template="Q : {question}",
                 description="best-prompt",
                 model_artifact=model if i <= 1 else None,
             )

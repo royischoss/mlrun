@@ -117,7 +117,7 @@ class TestNuclioRuntime(tests.system.base.TestMLRunSystem):
 
         llm_artifact = self.project.log_llm_prompt(
             "my_llm",
-            prompt_string="What is the meaning of life?",
+            prompt_template="What is the meaning of life?",
             model_artifact=model_artifact,
         )
 

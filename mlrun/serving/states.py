@@ -1187,21 +1187,25 @@ class Model(storey.ParallelExecutionRunnable, ModelObj):
         return None, None
 
 
-class LLMModel(Model):
+class LLModel(Model):
     def __init__(self, name: str, **kwargs):
         super().__init__(name, **kwargs)
 
-    def predict(self, body: Any, prompt: str) -> Any:
+    def predict(self, body: Any, messages: list[dict]) -> Any:
         return body
 
-    async def predict_async(self, body: Any, prompt: str) -> Any:
+    async def predict_async(self, body: Any, messages: list[dict]) -> Any:
         return body
 
     def run(self, body: Any, path: str) -> Any:
-        body, prompt = self.enrich_prompt_with_legend(body)
-        self.predict(body, prompt)
+        messages = self.enrich_prompt_with_legend(body)
+        return self.predict(body, messages)
 
-    def enrich_prompt_with_legend(self, body: dict) -> dict:
+    async def run_async(self, body: Any, path: str) -> Any:
+        messages = self.enrich_prompt_with_legend(body)
+        return await self.predict_async(body, messages)
+
+    def enrich_prompt_with_legend(self, body: dict) -> list[dict]:
         llm_prompt_artifact = self._get_artifact_object()
         if not (
             llm_prompt_artifact and isinstance(llm_prompt_artifact, LLMPromptArtifact)
@@ -1210,12 +1214,20 @@ class LLMModel(Model):
                 "LLMModel must be provided with LLMPromptArtifact"
             )
         prompt_legend = llm_prompt_artifact.spec.prompt_legend
-        prompt = llm_prompt_artifact.spec.prompt_template
+        prompt_template = llm_prompt_artifact.read_prompt(as_str=True)
         kwargs = {
             place_holder: body[body_map["field"]]
             for place_holder, body_map in prompt_legend.items()
         }
-        return json.loads(prompt.format(**kwargs))
+        filled_prompt_template = prompt_template.format(**kwargs)
+        try:
+            prompt_json = json.loads(filled_prompt_template)
+            return prompt_json
+        except json.JSONDecodeError:
+            raise MLRunInvalidArgumentError(
+                f"prompt_template provided for {llm_prompt_artifact.metadata.key} "
+                f"cannot be decoded as json"
+            )
 
 
 class ModelSelector:
