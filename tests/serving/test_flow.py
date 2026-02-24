@@ -515,3 +515,117 @@ def test_sync_flow_with_branches():
 def test_mrs_wraps_after():
     after = "other-step"
     assert ModelRunnerStep(name="my_model_runner", after=after).after == [after]
+
+
+def test_queue_step_function_attribute():
+    """Test that QueueStep respects function attribute for child functions."""
+    # Test QueueStep has function attribute
+    queue = QueueStep(name="test_queue", path="dummy://test", function="child")
+    assert queue.function == "child"
+
+    # Test QueueStep function is set via params_to_step
+    fn = mlrun.new_function("tests", kind="serving", project="x")
+    graph = fn.set_topology("flow", engine="async")
+    graph.to(">>", name="q1", path="dummy://test", function="child_func")
+    assert graph.steps["q1"].function == "child_func"
+
+    # Test QueueStep _is_local_function logic
+    queue_no_func = QueueStep(name="queue_no_func", path="dummy://test")
+    queue_with_func = QueueStep(
+        name="queue_with_func", path="dummy://test", function="child"
+    )
+
+    # Create mock context with current_function
+    class MockContext:
+        current_function = ""
+
+    context = MockContext()
+
+    # Queue without function should be local when current_function is also empty (parent function)
+    assert queue_no_func._is_local_function(context) is True
+
+    # Queue with function="child" should NOT be local when current_function is "" (parent)
+    assert queue_with_func._is_local_function(context) is False
+
+    # Queue with function should be local if current_function matches
+    context.current_function = "child"
+    assert queue_with_func._is_local_function(context) is True
+
+    # Queue without function should NOT be local on child function
+    assert queue_no_func._is_local_function(context) is False
+
+    context.current_function = "other"
+    assert queue_with_func._is_local_function(context) is False
+
+    context.current_function = "*"
+    assert queue_with_func._is_local_function(context) is True
+    assert queue_no_func._is_local_function(context) is True
+
+
+def test_queue_step_with_model_runner_on_child_function():
+    """Test that QueueStep after ModelRunnerStep on child function gets initialized correctly."""
+    fn = mlrun.new_function("tests", kind="serving", project="x")
+    graph = fn.set_topology("flow", engine="async")
+
+    model_runner_step = ModelRunnerStep(name="model_runner", raise_exception=True)
+    model_runner_step.add_model(
+        model_class="Echo",
+        execution_mechanism="naive",
+        endpoint_name="my_model",
+    )
+
+    # Setup graph: queue -> model_runner on child -> output queue on child
+    graph.to(">>", name="input_queue", path="dummy://input").to(
+        model_runner_step, function="child"
+    ).to(">>", name="output_queue", path="dummy://output", function="child")
+
+    # Verify the output queue has the correct function set
+    assert graph.steps["output_queue"].function == "child"
+    assert graph.steps["model_runner"].function == "child"
+
+
+def test_queue_step_on_child_function_receives_messages():
+    """Test that QueueStep on child function actually receives messages."""
+    fn = mlrun.new_function("tests", kind="serving", project="x")
+    graph = fn.set_topology("flow", engine="async")
+
+    # Simple graph: input queue -> process step on child -> output queue on child
+    graph.to(">>", name="input_queue", path="dummy://input").to(
+        name="process", class_name="Echo", function="child"
+    ).to(">>", name="output_queue", path="dummy://output", function="child")
+
+    # Run as the child function
+    server = fn.to_mock_server(current_function="child")
+    server.test("/", body={"test": "data"})
+    server.wait_for_completion()
+
+    # Verify output queue received the message
+    output_stream = server.graph.steps["output_queue"].async_object
+    assert (
+        output_stream is not None
+    ), "Output stream should be initialized on child function"
+    assert (
+        len(output_stream.event_list) == 1
+    ), "Output queue should have received one message"
+    assert output_stream.event_list[0]["test"] == "data"
+
+
+def test_queue_step_not_initialized_on_wrong_function():
+    """Test that QueueStep with function attribute is not initialized on wrong function."""
+    fn = mlrun.new_function("tests", kind="serving", project="x")
+    graph = fn.set_topology("flow", engine="async")
+
+    # Graph with local step followed by queue on child function
+    # When running as parent, the local step runs, but the child queue should not init stream
+    graph.to(name="local_step", class_name="Echo").to(
+        ">>", name="child_queue", path="dummy://test", function="child"
+    )
+
+    # Run as parent function (empty string means parent)
+    server = fn.to_mock_server(current_function="")
+
+    # The queue's _stream should not be set since _is_local_function returns False on parent
+    queue_step = server.graph.steps["child_queue"]
+    assert (
+        queue_step._stream is None
+    ), "Queue stream should not be initialized on parent function"

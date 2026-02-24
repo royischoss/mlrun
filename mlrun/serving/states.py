@@ -2589,6 +2589,7 @@ class QueueStep(BaseStep, StepToDict):
         "retention_in_hours",
         "trigger_args",
         "options",
+        "function",
     ]
 
     def __init__(
@@ -2599,6 +2600,7 @@ class QueueStep(BaseStep, StepToDict):
         shards: Optional[int] = None,
         retention_in_hours: Optional[int] = None,
         trigger_args: Optional[dict] = None,
+        function: Optional[str] = None,
         **options,
     ):
         super().__init__(name, after)
@@ -2607,11 +2609,28 @@ class QueueStep(BaseStep, StepToDict):
         self.retention_in_hours = retention_in_hours
         self.options = options
         self.trigger_args = trigger_args
+        self.function = function
         self._stream = None
         self._async_object = None
 
+    def _is_local_function(self, context, current_function=None) -> bool:
+        """Detect if the queue step should be initialized on the current function."""
+        current_function = current_function or get_current_function(context)
+        if current_function == "*":
+            return True
+        if not self.function and not current_function:
+            return True
+        if (
+            self.function and self.function == "*"
+        ) or self.function == current_function:
+            return True
+        return False
+
     def init_object(self, context, namespace, mode="sync", reset=False, **extra_kwargs):
         self.context = context
+        if not self._is_local_function(context):
+            # skip init of non-local functions
+            return
         if self.path:
             self._stream = get_stream_pusher(
                 self.path,
@@ -3887,6 +3906,8 @@ def params_to_step(
             raise MLRunInvalidArgumentError("queue name must be specified")
 
         step = class_name
+        if function:
+            step.function = function
 
     elif class_name in queue_class_names:
         if "path" not in class_args:
@@ -3899,7 +3920,7 @@ def params_to_step(
         if full_event is not None:
             class_args = class_args.copy()
             class_args["full_event"] = full_event
-        step = QueueStep(name, **class_args)
+        step = QueueStep(name, function=function, **class_args)
 
     elif class_name and hasattr(class_name, "to_dict"):
         struct = deepcopy(class_name.to_dict())

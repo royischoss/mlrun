@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from mlrun.serving import Model
 
 
 def inc(x):
@@ -27,3 +28,9 @@ class Augment:
         event.body["more_stuff"] = 5
         event.body["path"] = event.path
         return event
+
+
+class DummyModel(Model):
+    def predict(self, body, **kwargs):
+        body["extra"] = 123
+        return body
