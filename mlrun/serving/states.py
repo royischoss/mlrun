@@ -4017,6 +4017,7 @@ def _init_async_objects(context, steps, root):
                             DatastoreProfileKafkaTarget | DatastoreProfileKafkaStream,
                         ):
                             step._async_object = KafkaStoreyTarget(
+                                name=step.name,
                                 path=stream_path,
                                 context=context,
                                 max_iterations=max_iterations,
@@ -4024,6 +4025,7 @@ def _init_async_objects(context, steps, root):
                             )
                         elif isinstance(datastore_profile, DatastoreProfileV3io):
                             step._async_object = StreamStoreyTarget(
+                                name=step.name,
                                 stream_path=stream_path,
                                 context=context,
                                 max_iterations=max_iterations,
@@ -4042,6 +4044,7 @@ def _init_async_objects(context, steps, root):
                         )
 
                         step._async_object = storey.KafkaTarget(
+                            name=step.name,
                             topic=topic,
                             brokers=brokers,
                             producer_options=kafka_producer_options,
@@ -4051,6 +4054,7 @@ def _init_async_objects(context, steps, root):
                         )
                     elif stream_path.startswith("dummy://"):
                         step._async_object = _DummyStream(
+                            name=step.name,
                             context=context,
                             max_iterations=max_iterations,
                             **options,
@@ -4062,6 +4066,7 @@ def _init_async_objects(context, steps, root):
                         step._async_object = storey.StreamTarget(
                             storey.V3ioDriver(endpoint or config.v3io_api),
                             stream_path,
+                            name=step.name,
                             context=context,
                             max_iterations=max_iterations,
                             **options,
@@ -4069,6 +4074,7 @@ def _init_async_objects(context, steps, root):
                 else:
                     step._async_object = storey.Map(
                         lambda x: x,
+                        name=step.name,
                         max_iterations=max_iterations,
                     )
 
