@@ -214,6 +214,9 @@ class ControllerEvent(MonitoringStrEnum):
     FIRST_TIMESTAMP = "first_timestamp"
     LAST_TIMESTAMP = "last_timestamp"
 
+    # Set by the stream pod's Parquet fence once the endpoint's Parquet data is durable
+    PARQUET_FLUSH_CONFIRMED = "parquet_flush_confirmed"
+
     ENDPOINT_POLICY = "endpoint_policy"
     # Note: currently under endpoint policy we will have a dictionary including the keys: "application_names"
     # "base_period", and "updated_endpoint" stand for when the MEP was updated
