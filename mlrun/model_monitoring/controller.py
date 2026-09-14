@@ -503,8 +503,9 @@ class MonitoringApplicationController:
         for each endpoint.
 
         A regular event only requests a Parquet fence and never analyzes, so windows are closed by
-        the control events the fence releases. A control event the fence could not confirm still
-        closes its window, with a warning, so a failed flush is never retried and never blocks.
+        the NOP the fence releases and by batch complete events. A control event the fence could not
+        confirm still closes its window, with a warning, so a failed flush is never retried and
+        never blocks.
 
         :param event:                       (dict) Event that triggered the monitoring process.
         """
@@ -702,16 +703,17 @@ class MonitoringApplicationController:
         """
         Report whether the stream confirmed the endpoint's Parquet data as durable.
 
-        The fence always marks the event, so a missing mark means the event came from a stream pod
-        that predates the fence. Such an event counts as confirmed, so a partially upgraded cluster
-        keeps monitoring without a warning on every window.
+        Only NOP events pass the fence, and it always marks them. A missing mark therefore means a
+        batch complete event, whose delay covers the same write, or an event from a stream pod that
+        predates the fence. Both count as confirmed, so a partially upgraded cluster keeps
+        monitoring without a warning on every window.
 
         :param event: The control event to inspect.
         """
         confirmed = event.get(ControllerEvent.PARQUET_FLUSH_CONFIRMED)
         if confirmed is None:
             logger.debug(
-                "Control event carries no Parquet fence mark, treating it as legacy",
+                "Control event carries no Parquet fence mark, treating it as confirmed",
                 endpoint_id=event.get(ControllerEvent.ENDPOINT_ID),
                 kind=event.get(ControllerEvent.KIND),
             )

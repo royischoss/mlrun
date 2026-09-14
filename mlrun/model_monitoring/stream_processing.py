@@ -212,6 +212,13 @@ class EventStreamProcessor:
             _fn="(event.get('kind') == 'batch_complete')",
         )
 
+        graph.add_step(
+            "Delay",
+            name="BatchDelay",
+            after="FilterBatchComplete",
+            delay=self.parquet_batching_timeout_secs + 5,  # add margin
+        )
+
         # split the graph between event with error vs valid event
         graph.add_step(
             "storey.Filter",
@@ -327,12 +334,13 @@ class EventStreamProcessor:
         apply_parquet_target()
 
         # Fence branch: prove the endpoint's Parquet data is durable before the controller sees
-        # the control event. Fed by both the NOP route and the batch complete route.
+        # the NOP. Batch complete events keep their delay, which also covers the TSDB writes the
+        # controller reads to decide whether a window has data.
         def apply_parquet_fence():
             graph.add_step(
                 "ParquetFence",
                 name="ParquetFence",
-                after=["ForwardNOP", "FilterBatchComplete"],
+                after=["ForwardNOP"],
                 parquet_step_name="ParquetTarget",
                 timeout_secs=self.parquet_batching_timeout_secs,
             )
@@ -346,7 +354,7 @@ class EventStreamProcessor:
                 "controller_stream",
                 path=stream_uri,
                 sharding_func=ControllerEvent.ENDPOINT_ID,
-                after=["ParquetFence"],
+                after=["ParquetFence", "BatchDelay"],
                 # Force using the pipeline key instead of the one in the profile in case of v3io profile.
                 # In case of Kafka, this parameter will be ignored.
                 alternative_v3io_access_key="V3IO_ACCESS_KEY",
@@ -626,6 +634,16 @@ class ProcessBeforeParquet(mlrun.feature_store.steps.MapClass):
         return event
 
 
+class Delay(mlrun.feature_store.steps.MapClass):
+    def __init__(self, delay: int, **kwargs):
+        super().__init__(**kwargs)
+        self._delay = delay
+
+    async def do(self, event):
+        await asyncio.sleep(self._delay)
+        return event
+
+
 class ParquetFence(mlrun.feature_store.steps.MapClass):
     """Flush an endpoint's Parquet batches before releasing a control event to the controller.
 
@@ -635,9 +653,12 @@ class ParquetFence(mlrun.feature_store.steps.MapClass):
     event with PARQUET_FLUSH_CONFIRMED, which is what lets the controller close that window.
 
     A flush that times out or fails is forwarded with the mark set to False rather than dropped,
-    leaving the window pending for the controller to retry. The mark is always written, so an
-    event that carries no mark at all came from a stream pod predating the fence and the
-    controller treats it as legacy.
+    so a failed flush never blocks a window. The mark is always written on this route, so an event
+    reaching the controller without one took a route that does not pass here, and the controller
+    treats it as confirmed.
+
+    Only the NOP route is fenced. Batch complete events are delayed instead, since the controller
+    also reads TSDB to decide whether a window holds data and this step does not fence that write.
 
     :param parquet_step_name: Name of the Parquet target step in the graph to flush.
     :param timeout_secs:      Maximum time to await a single flush. Defaults to the Parquet

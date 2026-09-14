@@ -3361,7 +3361,24 @@ class TestParquetFence(TestMLRunSystemModelMonitoring):
     base_period_minutes = 1
     model_name = "fence_model"
     function_name = "fence-serving"
+    app_name = "fence-count-app"
     num_events = 20
+
+    def _deploy_count_app(self) -> None:
+        """
+        CountApp counts the rows of ``sample_df``, which is read from Parquet.
+
+        The count is the fence's own assertion: an unfenced window reads short or raises on an
+        empty frame, so only a confirmed flush can produce a count matching the events sent.
+        """
+        app_fn = self.project.set_model_monitoring_function(
+            func=str((Path(__file__).parent / "assets" / "application.py").absolute()),
+            application_class="CountApp",
+            name=self.app_name,
+            image=self.image or mlrun.mlconf.function_defaults.image_by_kind.job,
+        )
+        app_fn.deploy()
+        app_fn._wait_for_function_deployment(db=mlrun.get_run_db())
 
     def _deploy_model_serving(self) -> mlrun.runtimes.nuclio.serving.ServingRuntime:
         serving_fn = mlrun.code_to_function(
@@ -3381,6 +3398,25 @@ class TestParquetFence(TestMLRunSystemModelMonitoring):
         serving_fn.deploy()
         return typing.cast(mlrun.runtimes.nuclio.serving.ServingRuntime, serving_fn)
 
+    def _wait_for_serving_to_route(
+        self, serving_fn: mlrun.runtimes.nuclio.serving.ServingRuntime
+    ) -> None:
+        """
+        Invoke until the ingress routes, before the measured events are sent.
+
+        A deployed function reports ready while its nginx ingress is not routing yet, so the first
+        invocation can time out. Absorbing that here keeps the retry out of the timing window.
+        """
+        mlrun.utils.retry_until_successful(
+            5,
+            180,
+            self._logger,
+            True,
+            serving_fn.invoke,
+            f"v2/models/{self.model_name}/infer",
+            json.dumps({"inputs": [[1, 2, 3]]}),
+        )
+
     def test_window_closes_without_waiting_for_the_flush_interval(self) -> None:
         flush_interval_seconds = (
             mlrun.mlconf.model_endpoint_monitoring.parquet_batching_timeout_secs
@@ -3390,6 +3426,7 @@ class TestParquetFence(TestMLRunSystemModelMonitoring):
             flush_interval_seconds=flush_interval_seconds,
         )
 
+        self.set_mm_credentials()
         self.project.log_model(
             self.model_name,
             model_dir=str((Path(__file__).parent / "assets").absolute()),
@@ -3399,15 +3436,23 @@ class TestParquetFence(TestMLRunSystemModelMonitoring):
             image=self.image or mlrun.mlconf.function_defaults.image_by_kind.job,
             base_period=self.base_period_minutes,
             wait_for_deployment=True,
+            # CountApp is the only app here, so results depend on Parquet readability alone
+            # rather than on the drift app's feature-stats prerequisites.
+            deploy_histogram_data_drift_app=False,
         )
+        self._deploy_count_app()
 
         serving_fn = self._deploy_model_serving()
-        inference_finished_at = time.monotonic()
+        self._wait_for_serving_to_route(serving_fn)
+
+        # Timed from the last event, since that is the point after which a fenced window must
+        # become analyzable.
         for _ in range(self.num_events):
             serving_fn.invoke(
                 f"v2/models/{self.model_name}/infer",
                 json.dumps({"inputs": [[1, 2, 3]]}),
             )
+        inference_finished_at = time.monotonic()
 
         endpoints = (
             mlrun.db.get_run_db()
@@ -3423,8 +3468,10 @@ class TestParquetFence(TestMLRunSystemModelMonitoring):
 
         def check_app_results() -> None:
             df = tsdb.get_results_metadata(endpoint_id=endpoint_id)
+            # CountApp reads sample_df, and an empty frame raises instead of returning a result,
+            # so the mere presence of a result means the window's Parquet data was readable.
             assert not df.empty, (
-                "No application results, so no window closed on confirmed Parquet data"
+                "No application results, so no window closed on readable Parquet data"
             )
 
         # Deliberately no `parquet_batching_timeout_secs` cushion, unlike the other monitoring

@@ -42,8 +42,8 @@ from mlrun.model_monitoring.stream_processing import (
     EventStreamProcessor,
     HTTPAckResponder,
     MapFeatureNames,
-    ProcessBeforeParquet,
     ParquetFence,
+    ProcessBeforeParquet,
     ProcessEndpointEvent,
     ProcessHTTPEvent,
     TriggerRouter,
@@ -234,17 +234,18 @@ def _build_monitoring_graph_steps(
     return fn.spec.graph.steps
 
 
-def test_control_events_reach_controller_only_through_parquet_fence(
+def test_nop_events_reach_controller_only_through_parquet_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """NOP and batch complete events are fenced, replacing the fixed BatchDelay."""
+    """NOP events are fenced; batch complete events keep the delay that also covers TSDB."""
     steps = _build_monitoring_graph_steps(monkeypatch, "test-parquet-fence-topology")
 
     assert steps["ParquetTarget"].class_args["flush_key_field"] == "$key"
-    assert set(steps["ParquetFence"].after) == {"ForwardNOP", "FilterBatchComplete"}
+    assert steps["ParquetFence"].after == ["ForwardNOP"]
     assert steps["ParquetFence"].class_args["timeout_secs"] == 10
-    assert steps["controller_stream"].after == ["ParquetFence"]
-    assert "BatchDelay" not in steps.keys()
+    assert steps["BatchDelay"].after == ["FilterBatchComplete"]
+    assert steps["BatchDelay"].class_args["delay"] == 15
+    assert set(steps["controller_stream"].after) == {"ParquetFence", "BatchDelay"}
 
 
 def test_parquet_fence_timeout_defaults_to_parquet_flush_interval(
