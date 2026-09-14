@@ -3156,3 +3156,120 @@ class TestUserEndpointHTTPIngest(TestMLRunSystemModelMonitoring):
             initial_wait=app_results_initial_wait,
             condition_description="monitoring app to write results for HTTP-ingested events",
         )
+
+
+@TestMLRunSystemModelMonitoring.skip_test_if_env_not_configured
+@pytest.mark.enterprise
+class TestParquetFence(TestMLRunSystemModelMonitoring):
+    """
+    A window must close on the stream's Parquet fence, not on the Parquet target's flush interval.
+
+    Every other monitoring test waits out ``parquet_batching_timeout_secs`` before looking for
+    results, which is what hides the race this fence removes. Here the results must appear without
+    that cushion, which is only possible if the NOP event forced a keyed flush.
+
+    The strength of this test follows the deployment's configured flush interval: the larger
+    ``model_endpoint_monitoring.parquet_batching_timeout_secs`` is on the API server, the less
+    room there is for the target to have flushed on its own schedule. The interval is baked into
+    the stream's graph when it is deployed, so the test can only read it, never set it.
+    """
+
+    project_name = "test-mm-parquet-fence"
+    # Set image to "<repo>/mlrun:<tag>" for local testing
+    image: str | None = None
+    base_period_minutes = 1
+    model_name = "fence_model"
+    function_name = "fence-serving"
+    num_events = 20
+
+    def _deploy_model_serving(self) -> mlrun.runtimes.nuclio.serving.ServingRuntime:
+        serving_fn = mlrun.code_to_function(
+            project=self.project_name,
+            name=self.function_name,
+            filename=f"{str((Path(__file__).parent / 'assets').absolute())}/models.py",
+            kind="serving",
+        )
+        serving_fn.add_model(
+            self.model_name,
+            model_path=f"store://models/{self.project_name}/{self.model_name}:latest",
+            class_name="OneToOne",
+        )
+        serving_fn.set_tracking()
+        if self.image is not None:
+            serving_fn.spec.image = serving_fn.spec.build.image = self.image
+        serving_fn.deploy()
+        return typing.cast(mlrun.runtimes.nuclio.serving.ServingRuntime, serving_fn)
+
+    def test_window_closes_without_waiting_for_the_flush_interval(self) -> None:
+        flush_interval_seconds = (
+            mlrun.mlconf.model_endpoint_monitoring.parquet_batching_timeout_secs
+        )
+        self._logger.debug(
+            "Attributing readable Parquet data to the fence",
+            flush_interval_seconds=flush_interval_seconds,
+        )
+
+        self.project.log_model(
+            self.model_name,
+            model_dir=str((Path(__file__).parent / "assets").absolute()),
+            model_file="model.pkl",
+        )
+        self.project.enable_model_monitoring(
+            image=self.image or mlrun.mlconf.function_defaults.image_by_kind.job,
+            base_period=self.base_period_minutes,
+            wait_for_deployment=True,
+        )
+
+        serving_fn = self._deploy_model_serving()
+        inference_finished_at = time.monotonic()
+        for _ in range(self.num_events):
+            serving_fn.invoke(
+                f"v2/models/{self.model_name}/infer",
+                json.dumps({"inputs": [[1, 2, 3]]}),
+            )
+
+        endpoints = (
+            mlrun.db.get_run_db()
+            .list_model_endpoints(project=self.project_name)
+            .endpoints
+        )
+        assert len(endpoints) == 1, "Expected exactly one monitored endpoint"
+        endpoint_id = endpoints[0].metadata.uid
+
+        tsdb = mlrun.model_monitoring.get_tsdb_connector(
+            project=self.project_name, profile=self.mm_tsdb_profile
+        )
+
+        def check_app_results() -> None:
+            df = tsdb.get_results_metadata(endpoint_id=endpoint_id)
+            assert not df.empty, (
+                "No application results, so no window closed on confirmed Parquet data"
+            )
+
+        # Deliberately no `parquet_batching_timeout_secs` cushion, unlike the other monitoring
+        # tests: waiting it out is what would mask an unfenced window.
+        base_period_seconds = self.base_period_minutes * 60
+        self.wait_for_condition(
+            condition_check=check_app_results,
+            initial_wait=base_period_seconds,
+            timeout=2 * base_period_seconds + 60,
+            condition_description=(
+                "monitoring app results without waiting out the Parquet flush interval"
+            ),
+        )
+
+        elapsed = time.monotonic() - inference_finished_at
+        if flush_interval_seconds > base_period_seconds:
+            assert elapsed < flush_interval_seconds, (
+                f"Results took {elapsed:.0f}s, which the target's own {flush_interval_seconds}s "
+                "flush could account for, so the fence is not what made the data readable"
+            )
+        else:
+            self._logger.warning(
+                "Results arrived, but the configured flush interval is short enough to explain "
+                "them on its own; raise parquet_batching_timeout_secs on the API server to make "
+                "this test a strict check on the fence",
+                flush_interval_seconds=flush_interval_seconds,
+                base_period_seconds=base_period_seconds,
+                elapsed_seconds=round(elapsed, 1),
+            )

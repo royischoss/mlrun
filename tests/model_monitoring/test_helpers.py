@@ -15,7 +15,7 @@
 import datetime
 from collections.abc import Iterator
 from typing import NamedTuple, Union
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import nuclio
 import numpy as np
@@ -34,6 +34,12 @@ from mlrun.common.model_monitoring.helpers import (
     pad_hist,
 )
 from mlrun.common.schemas import EndpointMode
+from mlrun.common.schemas.model_monitoring.constants import (
+    ControllerEvent,
+    ControllerEventEndpointPolicy,
+    ControllerEventKind,
+    EndpointType,
+)
 from mlrun.datastore import KafkaOutputStream, OutputStream
 from mlrun.datastore.datastore_profile import (
     DatastoreProfile,
@@ -375,6 +381,15 @@ class TestBatchInterval:
 
 class TestBatchWindowGenerator:
     @staticmethod
+    @pytest.fixture(autouse=True)
+    def _patch_store_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "MLRUN_MODEL_ENDPOINT_MONITORING__STORE_PREFIXES__DEFAULT",
+            "memory://users/pipelines/{{project}}/model-endpoints/{{kind}}",
+        )
+        mlrun.mlconf.reload()
+
+    @staticmethod
     def test_last_updated_is_in_the_past() -> None:
         last_request = datetime.datetime(2023, 11, 16, 12, 0, 0)
         last_updated = _BatchWindowGenerator._get_last_updated_time(
@@ -432,6 +447,173 @@ class TestControllerLegacyEndpoints:
         assert controller._legacy_endpoints_warned is True
         # No real-time endpoints -> the scan returns before processing any endpoint
         controller.project_obj.list_model_monitoring_functions.assert_not_called()
+
+
+class TestControllerParquetFence:
+    @staticmethod
+    def _controller() -> MonitoringApplicationController:
+        controller = MonitoringApplicationController.__new__(
+            MonitoringApplicationController
+        )
+        controller.project = "test-project"
+        controller._window_length = int(datetime.timedelta(minutes=10).total_seconds())
+        controller.model_monitoring_access_key = "access-key"
+        controller.tsdb_connector = Mock()
+        controller.project_obj = Mock()
+        app_function = Mock()
+        app_function.metadata.name = "app"
+        controller.project_obj.list_model_monitoring_functions.return_value = [
+            app_function
+        ]
+        controller.project_obj.list_model_endpoints.return_value = Mock(
+            endpoints=[Mock()]
+        )
+        return controller
+
+    @staticmethod
+    def _control_event(**extra) -> dict:
+        event = {
+            ControllerEvent.KIND: ControllerEventKind.NOP_EVENT,
+            ControllerEvent.PROJECT: "p",
+            ControllerEvent.ENDPOINT_ID: "ep",
+            ControllerEvent.ENDPOINT_NAME: "model",
+            ControllerEvent.TIMESTAMP: "2026-01-01T01:00:00+00:00",
+            ControllerEvent.FIRST_REQUEST: "2026-01-01T00:00:00+00:00",
+            ControllerEvent.FIRST_TIMESTAMP: "2026-01-01T00:00:00+00:00",
+            ControllerEvent.LAST_TIMESTAMP: "2026-01-01T01:00:00+00:00",
+            ControllerEvent.ENDPOINT_TYPE: EndpointType.NODE_EP.value,
+            ControllerEvent.FEATURE_SET_URI: "store://feature-sets/p/fs",
+            ControllerEvent.ENDPOINT_POLICY: {
+                ControllerEventEndpointPolicy.MONITORING_APPLICATIONS: ["app"],
+                ControllerEventEndpointPolicy.BASE_PERIOD: 10,
+                ControllerEventEndpointPolicy.ENDPOINT_UPDATED: "2026-01-01T00:00:00+00:00",
+            },
+        }
+        event.update(extra)
+        return event
+
+    @staticmethod
+    def _patch_window_generator(
+        monkeypatch: pytest.MonkeyPatch, window: Mock
+    ) -> MagicMock:
+        generator_cls = MagicMock()
+        generator_cls.return_value.__enter__.return_value = window
+        monkeypatch.setattr(
+            mlrun.model_monitoring.controller, "_BatchWindowGenerator", generator_cls
+        )
+        return generator_cls
+
+    def test_regular_event_only_requests_a_fence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A regular event is a pure trigger: it must not open a window on its own."""
+        controller = self._controller()
+        generator_cls = self._patch_window_generator(monkeypatch, Mock())
+        controller._request_parquet_fence = Mock()
+
+        controller.model_endpoint_process(
+            event=self._control_event(
+                **{ControllerEvent.KIND: ControllerEventKind.REGULAR_EVENT}
+            )
+        )
+
+        controller._request_parquet_fence.assert_called_once()
+        generator_cls.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("kind", "mark", "should_warn"),
+        [
+            (
+                ControllerEventKind.NOP_EVENT,
+                {ControllerEvent.PARQUET_FLUSH_CONFIRMED: True},
+                False,
+            ),
+            (
+                ControllerEventKind.NOP_EVENT,
+                {ControllerEvent.PARQUET_FLUSH_CONFIRMED: False},
+                True,
+            ),
+            (ControllerEventKind.NOP_EVENT, {}, False),
+            (
+                ControllerEventKind.BATCH_COMPLETE,
+                {ControllerEvent.PARQUET_FLUSH_CONFIRMED: False},
+                True,
+            ),
+        ],
+        ids=["confirmed", "unconfirmed", "legacy-unmarked", "unconfirmed-batch"],
+    )
+    def test_a_control_event_closes_its_window_and_a_failed_flush_only_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        mark: dict,
+        should_warn: bool,
+    ) -> None:
+        """A failed flush is never retried, so the window still closes and the warning is the record of it."""
+        controller = self._controller()
+        window = Mock()
+        window.get_intervals.return_value = []
+        self._patch_window_generator(monkeypatch, window)
+        warnings_seen: list[str] = []
+        monkeypatch.setattr(
+            mlrun.model_monitoring.controller.logger,
+            "warning",
+            lambda msg, *args, **kwargs: warnings_seen.append(msg),
+        )
+
+        controller.model_endpoint_process(
+            event=self._control_event(**{ControllerEvent.KIND: kind}, **mark)
+        )
+
+        assert window.get_intervals.called, "Every control event closes its window"
+        assert (
+            any("could not confirm" in message for message in warnings_seen)
+            is should_warn
+        )
+
+    @pytest.mark.parametrize("min_last_analyzed", [1000.0, None])
+    def test_fence_request_pushes_one_nop(
+        self, monkeypatch: pytest.MonkeyPatch, min_last_analyzed: float | None
+    ) -> None:
+        """A due window produces exactly one unmarked NOP, whose timestamp is the watermark."""
+        controller = self._controller()
+        window = Mock()
+        window.get_min_last_analyzed.return_value = min_last_analyzed
+        self._patch_window_generator(monkeypatch, window)
+        controller._push_to_main_stream = Mock()
+
+        controller._request_parquet_fence(
+            event=self._control_event(
+                **{ControllerEvent.KIND: ControllerEventKind.REGULAR_EVENT}
+            )
+        )
+
+        controller._push_to_main_stream.assert_called_once()
+        pushed = controller._push_to_main_stream.call_args.kwargs["event"]
+        assert pushed[ControllerEvent.KIND] == ControllerEventKind.NOP_EVENT
+        assert ControllerEvent.PARQUET_FLUSH_CONFIRMED not in pushed, (
+            "Only the stream may mark an event as fenced"
+        )
+
+    def test_fence_is_not_requested_before_a_window_is_due(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The base period still bounds how often the stream sees a fence."""
+        controller = self._controller()
+        window = Mock()
+        window.get_min_last_analyzed.return_value = (
+            mlrun.utils.datetime_now().timestamp()
+        )
+        self._patch_window_generator(monkeypatch, window)
+        controller._push_to_main_stream = Mock()
+
+        controller._request_parquet_fence(
+            event=self._control_event(
+                **{ControllerEvent.KIND: ControllerEventKind.REGULAR_EVENT}
+            )
+        )
+
+        controller._push_to_main_stream.assert_not_called()
 
 
 class TestGetMonitoringTimeWindow:

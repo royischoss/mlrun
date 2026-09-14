@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import datetime
 import json
 import os
 import unittest.mock
 
+import pyarrow.parquet as pq
 import pytest
 import storey
 
 import mlrun
 import mlrun.model_monitoring
 from mlrun.common.schemas.model_monitoring.constants import (
+    ControllerEvent,
+    ControllerEventKind,
     EventFieldType,
     NuclioMonitoringEnvVars,
 )
@@ -35,6 +40,7 @@ from mlrun.model_monitoring.stream_processing import (
     _HTTP_ERROR_KEY,
     EventStreamProcessor,
     HTTPAckResponder,
+    ParquetFence,
     ProcessEndpointEvent,
     ProcessHTTPEvent,
     TriggerRouter,
@@ -205,6 +211,216 @@ def test_timescaledb_handle_model_error_reads_from_config(
     call = _find_step_call(graph, "timescaledb_error")
     assert call.kwargs["max_events"] == 555
     assert call.kwargs["flush_after_seconds"] == 66
+
+
+def _build_monitoring_graph_steps(
+    monkeypatch: pytest.MonkeyPatch, project_name: str
+) -> dict:
+    tsdb_connector = _make_timescaledb_connector(monkeypatch, project_name)
+    project = mlrun.get_or_create_project(project_name, allow_cross_project=True)
+    fn = project.set_function(kind="serving", name="fence-fn")
+    stream_path = mlrun.model_monitoring.get_stream_path(
+        project=project_name, profile=DatastoreProfileV3io(name="v3io-stream-fence")
+    )
+
+    EventStreamProcessor(
+        project_name, 1000, 10, "mytarget"
+    ).apply_monitoring_serving_graph(
+        fn, tsdb_connector, stream_path, _MONITORING_STREAM_URI
+    )
+    return fn.spec.graph.steps
+
+
+def test_control_events_reach_controller_only_through_parquet_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOP and batch complete events are fenced, replacing the fixed BatchDelay."""
+    steps = _build_monitoring_graph_steps(monkeypatch, "test-parquet-fence-topology")
+
+    assert steps["ParquetTarget"].class_args["flush_key_field"] == "$key"
+    assert set(steps["ParquetFence"].after) == {"ForwardNOP", "FilterBatchComplete"}
+    assert steps["ParquetFence"].class_args["timeout_secs"] == 10
+    assert steps["controller_stream"].after == ["ParquetFence"]
+    assert "BatchDelay" not in steps.keys()
+
+
+def test_parquet_fence_timeout_defaults_to_parquet_flush_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence falls back to the same configured interval the Parquet target flushes on."""
+    monkeypatch.setattr(
+        mlrun.mlconf.model_endpoint_monitoring, "parquet_batching_timeout_secs", 44
+    )
+
+    assert ParquetFence()._timeout_secs == 44
+
+
+class _FakeParquetTarget:
+    def __init__(self, error: Exception | None = None, hang: bool = False):
+        self._error = error
+        self._hang = hang
+        self.flushed_keys: list[str] = []
+
+    async def flush(self, flush_key: str) -> None:
+        self.flushed_keys.append(flush_key)
+        if self._hang:
+            await asyncio.sleep(30)
+        if self._error is not None:
+            raise self._error
+
+
+class _CountingRoot(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lookups = 0
+
+    def __getitem__(self, key):
+        self.lookups += 1
+        return super().__getitem__(key)
+
+
+def _make_fence(target: _FakeParquetTarget | None, timeout_secs: float = 30):
+    fence = ParquetFence(timeout_secs=timeout_secs)
+    fence.context = unittest.mock.Mock()
+    if target is None:
+        fence.context.root = {}
+    else:
+        fence.context.root = {"ParquetTarget": unittest.mock.Mock(async_object=target)}
+    return fence
+
+
+async def test_parquet_fence_confirms_event_after_flush() -> None:
+    """A successful keyed flush marks the event so the controller may close the window."""
+    target = _FakeParquetTarget()
+    fence = _make_fence(target)
+
+    event = await fence.do({ControllerEvent.ENDPOINT_ID: "ep-1"})
+
+    assert event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] is True
+    assert target.flushed_keys == ["ep-1"]
+
+
+@pytest.mark.parametrize(
+    "kind", [ControllerEventKind.NOP_EVENT, ControllerEventKind.BATCH_COMPLETE]
+)
+async def test_parquet_fence_preserves_control_event_payload(kind: str) -> None:
+    """Both control kinds keep every field the controller reads; the fence only adds its flag."""
+    fence = _make_fence(_FakeParquetTarget())
+    body = {
+        ControllerEvent.KIND: kind,
+        ControllerEvent.PROJECT: "proj",
+        ControllerEvent.ENDPOINT_ID: "ep-1",
+        ControllerEvent.FIRST_TIMESTAMP: "2026-01-01T00:00:00+00:00",
+        ControllerEvent.LAST_TIMESTAMP: "2026-01-01T01:00:00+00:00",
+    }
+
+    event = await fence.do(dict(body))
+
+    assert event == body | {ControllerEvent.PARQUET_FLUSH_CONFIRMED: True}
+
+
+async def test_parquet_fence_resolves_target_once_across_events() -> None:
+    """The target is looked up lazily and cached, not re-walked from the graph per event."""
+    target = _FakeParquetTarget()
+    root = _CountingRoot({"ParquetTarget": unittest.mock.Mock(async_object=target)})
+    fence = ParquetFence()
+    fence.context = unittest.mock.Mock()
+    fence.context.root = root
+
+    for _ in range(3):
+        await fence.do({ControllerEvent.ENDPOINT_ID: "ep-1"})
+
+    assert root.lookups == 1
+    assert target.flushed_keys == ["ep-1"] * 3
+
+
+async def test_parquet_fence_forwards_unconfirmed_on_timeout() -> None:
+    """A flush that exceeds the timeout is forwarded unconfirmed, leaving the window pending."""
+    fence = _make_fence(_FakeParquetTarget(hang=True), timeout_secs=0.01)
+
+    event = await fence.do({ControllerEvent.ENDPOINT_ID: "ep-1"})
+
+    assert event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] is False
+
+
+async def test_parquet_fence_forwards_unconfirmed_on_flush_failure() -> None:
+    """A failed write is never reported as durable."""
+    fence = _make_fence(_FakeParquetTarget(error=OSError("gcs unavailable")))
+
+    event = await fence.do({ControllerEvent.ENDPOINT_ID: "ep-1"})
+
+    assert event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] is False
+
+
+@pytest.mark.parametrize(
+    ("target", "event_body"),
+    [
+        (None, {ControllerEvent.ENDPOINT_ID: "ep-1"}),
+        (_FakeParquetTarget(), {}),
+    ],
+)
+async def test_parquet_fence_forwards_unconfirmed_when_unresolvable(
+    target: _FakeParquetTarget | None, event_body: dict
+) -> None:
+    """A missing target step or endpoint id must not drop the control event."""
+    fence = _make_fence(target)
+
+    event = await fence.do(event_body)
+
+    assert event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] is False
+
+
+async def test_parquet_fence_makes_real_parquet_data_readable(tmp_path) -> None:
+    """The fence holds against the real storey target, with the monitoring target's own settings.
+
+    The other fence tests stub the target, so only this one would notice storey changing the flush
+    API or the key extraction under the partition layout the monitoring graph configures.
+    """
+    out_dir = f"{tmp_path}/fence/"
+    target = storey.ParquetTarget(
+        out_dir,
+        columns=["v"],
+        index_cols=[EventFieldType.ENDPOINT_ID],
+        key_bucketing_number=0,
+        time_partitioning_granularity="hour",
+        partition_cols=["$key", "$year", "$month", "$day", "$hour"],
+        flush_key_field="$key",
+        # Long enough that nothing lands unless the fence flushes it
+        flush_after_seconds=600,
+    )
+    flow = storey.build_flow([storey.AsyncEmitSource(), target]).run()
+    event_time = datetime.datetime(2026, 1, 1, 10, tzinfo=datetime.UTC)
+    await flow.emit(
+        storey.Event(
+            {EventFieldType.ENDPOINT_ID: "ep-1", "v": 1},
+            key="ep-1",
+            processing_time=event_time,
+        )
+    )
+    await flow.emit(
+        storey.Event(
+            {EventFieldType.ENDPOINT_ID: "ep-2", "v": 2},
+            key="ep-2",
+            processing_time=event_time,
+        )
+    )
+
+    fence = ParquetFence()
+    fence.context = unittest.mock.Mock()
+    fence.context.root = {"ParquetTarget": unittest.mock.Mock(async_object=target)}
+
+    event = await fence.do({ControllerEvent.ENDPOINT_ID: "ep-1"})
+
+    assert event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] is True
+    assert pq.read_table(out_dir).to_pandas()["v"].tolist() == [1], (
+        "The fenced endpoint's data must be readable, and only that endpoint's"
+    )
+
+    await flow.terminate(wait=True)
+
+    assert sorted(pq.read_table(out_dir).to_pandas()["v"].tolist()) == [1, 2], (
+        "The unfenced endpoint keeps its data buffered until the flow drains it"
+    )
 
 
 def test_timescaledb_handle_model_error_kwargs_override_config(

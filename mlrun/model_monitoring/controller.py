@@ -377,6 +377,9 @@ class MonitoringApplicationController:
             1.  never monitored the one of the endpoint applications meaning min_last_analyzed is None
             2.  min_last_analyzed stands in the condition for sending NOP event and this the first time regular event
             is sent with the combination of  current last_request  & current last_analyzed  per endpoint.
+
+        A regular event is the only source of a NOP fence request, so this gate is also what bounds
+        how many fences the stream sees.
         """
         last_timestamp_sent = schedules_file.get_endpoint_last_request(
             endpoint.metadata.uid
@@ -499,6 +502,10 @@ class MonitoringApplicationController:
         Process a model endpoint and trigger the monitoring applications. This function running on different process
         for each endpoint.
 
+        A regular event only requests a Parquet fence and never analyzes, so windows are closed by
+        the control events the fence releases. A control event the fence could not confirm still
+        closes its window, with a warning, so a failed flush is never retried and never blocks.
+
         :param event:                       (dict) Event that triggered the monitoring process.
         """
         logger.info("Model endpoint process started", event=event)
@@ -506,10 +513,22 @@ class MonitoringApplicationController:
         try:
             project_name = event[ControllerEvent.PROJECT]
             endpoint_id = event[ControllerEvent.ENDPOINT_ID]
-            if (
-                event[ControllerEvent.KIND]
-                == mm_constants.ControllerEventKind.BATCH_COMPLETE
-            ):
+            kind = event[ControllerEvent.KIND]
+
+            if kind == mm_constants.ControllerEventKind.REGULAR_EVENT:
+                self._request_parquet_fence(event=event)
+                return
+
+            if not self._is_parquet_flush_confirmed(event=event):
+                logger.warning(
+                    "The stream could not confirm the endpoint's Parquet data as durable, closing "
+                    "the window anyway, its results may be based on incomplete data",
+                    endpoint_id=endpoint_id,
+                    project=project_name,
+                    kind=kind,
+                )
+
+            if kind == mm_constants.ControllerEventKind.BATCH_COMPLETE:
                 monitoring_functions = (
                     self.project_obj.list_model_monitoring_functions()
                 )
@@ -616,44 +635,6 @@ class MonitoringApplicationController:
                                 endpoint_updated=endpoint_updated,
                             )
 
-                if (
-                    event[ControllerEvent.KIND]
-                    == mm_constants.ControllerEventKind.REGULAR_EVENT
-                ):
-                    base_period = event[ControllerEvent.ENDPOINT_POLICY][
-                        ControllerEventEndpointPolicy.BASE_PERIOD
-                    ]
-                    current_time = mlrun.utils.datetime_now()
-                    if self._should_send_nop_event(
-                        base_period,
-                        batch_window_generator.get_min_last_analyzed(),
-                        current_time,
-                    ):
-                        event = {
-                            ControllerEvent.KIND: mm_constants.ControllerEventKind.NOP_EVENT,
-                            ControllerEvent.PROJECT: project_name,
-                            ControllerEvent.ENDPOINT_ID: endpoint_id,
-                            ControllerEvent.ENDPOINT_NAME: endpoint_name,
-                            ControllerEvent.TIMESTAMP: current_time.isoformat(
-                                timespec="microseconds"
-                            ),
-                            ControllerEvent.ENDPOINT_POLICY: event[
-                                ControllerEvent.ENDPOINT_POLICY
-                            ],
-                            ControllerEvent.ENDPOINT_TYPE: event[
-                                ControllerEvent.ENDPOINT_TYPE
-                            ],
-                            ControllerEvent.FEATURE_SET_URI: event[
-                                ControllerEvent.FEATURE_SET_URI
-                            ],
-                            ControllerEvent.FIRST_REQUEST: event[
-                                ControllerEvent.FIRST_REQUEST
-                            ],
-                        }
-                        self._push_to_main_stream(
-                            event=event,
-                            endpoint_id=endpoint_id,
-                        )
             logger.info(
                 "Finish analyze for",
                 timestamp=last_stream_timestamp,
@@ -664,6 +645,78 @@ class MonitoringApplicationController:
                 "Encountered an exception",
                 endpoint_id=event[ControllerEvent.ENDPOINT_ID],
             )
+
+    def _request_parquet_fence(self, event: dict) -> None:
+        """
+        Turn a regular trigger into a single NOP fence request on the main monitoring stream.
+
+        The NOP's timestamp is the watermark the fence acknowledges: the stream flushes the
+        endpoint's Parquet batches only after the event reaches it, so every record up to that
+        timestamp is durable by the time the confirmed event returns.
+
+        :param event: The regular event that triggered this endpoint.
+        """
+        endpoint_id = event[ControllerEvent.ENDPOINT_ID]
+        project_name = event[ControllerEvent.PROJECT]
+        current_time = mlrun.utils.datetime_now()
+
+        with _BatchWindowGenerator(
+            project=project_name,
+            endpoint_id=endpoint_id,
+        ) as batch_window_generator:
+            min_last_analyzed = batch_window_generator.get_min_last_analyzed()
+
+        if not self._should_send_nop_event(
+            event[ControllerEvent.ENDPOINT_POLICY][
+                ControllerEventEndpointPolicy.BASE_PERIOD
+            ],
+            min_last_analyzed,
+            current_time,
+        ):
+            logger.info(
+                "No window is due for closing, didn't request a Parquet fence",
+                endpoint_id=endpoint_id,
+                last_analyzed=min_last_analyzed,
+            )
+            return
+
+        self._push_to_main_stream(
+            event={
+                ControllerEvent.KIND: mm_constants.ControllerEventKind.NOP_EVENT,
+                ControllerEvent.PROJECT: project_name,
+                ControllerEvent.ENDPOINT_ID: endpoint_id,
+                ControllerEvent.ENDPOINT_NAME: event[ControllerEvent.ENDPOINT_NAME],
+                ControllerEvent.TIMESTAMP: current_time.isoformat(
+                    timespec="microseconds"
+                ),
+                ControllerEvent.ENDPOINT_POLICY: event[ControllerEvent.ENDPOINT_POLICY],
+                ControllerEvent.ENDPOINT_TYPE: event[ControllerEvent.ENDPOINT_TYPE],
+                ControllerEvent.FEATURE_SET_URI: event[ControllerEvent.FEATURE_SET_URI],
+                ControllerEvent.FIRST_REQUEST: event[ControllerEvent.FIRST_REQUEST],
+            },
+            endpoint_id=endpoint_id,
+        )
+
+    @staticmethod
+    def _is_parquet_flush_confirmed(event: dict) -> bool:
+        """
+        Report whether the stream confirmed the endpoint's Parquet data as durable.
+
+        The fence always marks the event, so a missing mark means the event came from a stream pod
+        that predates the fence. Such an event counts as confirmed, so a partially upgraded cluster
+        keeps monitoring without a warning on every window.
+
+        :param event: The control event to inspect.
+        """
+        confirmed = event.get(ControllerEvent.PARQUET_FLUSH_CONFIRMED)
+        if confirmed is None:
+            logger.debug(
+                "Control event carries no Parquet fence mark, treating it as legacy",
+                endpoint_id=event.get(ControllerEvent.ENDPOINT_ID),
+                kind=event.get(ControllerEvent.KIND),
+            )
+            return True
+        return bool(confirmed)
 
     def _push_to_applications(
         self,

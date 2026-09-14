@@ -147,8 +147,9 @@ class EventStreamProcessor:
            the default parquet path is under mlrun.mlconf.model_endpoint_monitoring.user_space. Note that if you are
            using CE, the parquet target path is based on the defined MLRun artifact path.
 
-        In a separate branch, "batch complete" events are forwarded to the controller stream with an intentional delay,
-        to allow for data to first be written to parquet.
+        In a separate branch, "batch complete" and NOP events pass through a Parquet fence before being
+        forwarded to the controller stream, so the controller only closes a window whose Parquet data is
+        already durable.
 
         :param fn: A serving function.
         :param tsdb_connector: Time series database connector.
@@ -209,13 +210,6 @@ class EventStreamProcessor:
             "FilterBatchComplete",
             after="TriggerRouter",
             _fn="(event.get('kind') == 'batch_complete')",
-        )
-
-        graph.add_step(
-            "Delay",
-            name="BatchDelay",
-            after="FilterBatchComplete",
-            delay=self.parquet_batching_timeout_secs + 5,  # add margin
         )
 
         # split the graph between event with error vs valid event
@@ -327,9 +321,23 @@ class EventStreamProcessor:
                 time_partitioning_granularity="hour",
                 time_field=EventFieldType.TIMESTAMP,
                 partition_cols=["$key", "$year", "$month", "$day", "$hour"],
+                flush_key_field="$key",
             )
 
         apply_parquet_target()
+
+        # Fence branch: prove the endpoint's Parquet data is durable before the controller sees
+        # the control event. Fed by both the NOP route and the batch complete route.
+        def apply_parquet_fence():
+            graph.add_step(
+                "ParquetFence",
+                name="ParquetFence",
+                after=["ForwardNOP", "FilterBatchComplete"],
+                parquet_step_name="ParquetTarget",
+                timeout_secs=self.parquet_batching_timeout_secs,
+            )
+
+        apply_parquet_fence()
 
         # controller branch
         def apply_push_controller_stream(stream_uri: str):
@@ -338,7 +346,7 @@ class EventStreamProcessor:
                 "controller_stream",
                 path=stream_uri,
                 sharding_func=ControllerEvent.ENDPOINT_ID,
-                after=["ForwardNOP", "BatchDelay"],
+                after=["ParquetFence"],
                 # Force using the pipeline key instead of the one in the profile in case of v3io profile.
                 # In case of Kafka, this parameter will be ignored.
                 alternative_v3io_access_key="V3IO_ACCESS_KEY",
@@ -620,14 +628,86 @@ class ProcessBeforeParquet(mlrun.feature_store.steps.MapClass):
         return event
 
 
-class Delay(mlrun.feature_store.steps.MapClass):
-    def __init__(self, delay: int, **kwargs):
-        super().__init__(**kwargs)
-        self._delay = delay
+class ParquetFence(mlrun.feature_store.steps.MapClass):
+    """Flush an endpoint's Parquet batches before releasing a control event to the controller.
 
-    async def do(self, event):
-        await asyncio.sleep(self._delay)
+    The Parquet branch writes to object storage and can lag the TSDB branch, so a control event
+    that reaches the controller unfenced may open a window whose Parquet data is not yet readable.
+    This step forces a keyed flush of the endpoint's buffered and in-flight batches and marks the
+    event with PARQUET_FLUSH_CONFIRMED, which is what lets the controller close that window.
+
+    A flush that times out or fails is forwarded with the mark set to False rather than dropped,
+    leaving the window pending for the controller to retry. The mark is always written, so an
+    event that carries no mark at all came from a stream pod predating the fence and the
+    controller treats it as legacy.
+
+    :param parquet_step_name: Name of the Parquet target step in the graph to flush.
+    :param timeout_secs:      Maximum time to await a single flush. Defaults to the Parquet
+                              batching flush interval, so both share one configured value.
+    """
+
+    def __init__(
+        self,
+        parquet_step_name: str = "ParquetTarget",
+        timeout_secs: float | None = None,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._parquet_step_name = parquet_step_name
+        self._timeout_secs = (
+            timeout_secs
+            if timeout_secs is not None
+            else mlrun.mlconf.model_endpoint_monitoring.parquet_batching_timeout_secs
+        )
+        self._parquet_target = None
+
+    async def do(self, event: dict) -> dict:
+        event[ControllerEvent.PARQUET_FLUSH_CONFIRMED] = await self._flush_endpoint(
+            event
+        )
         return event
+
+    async def _flush_endpoint(self, event: dict) -> bool:
+        endpoint_id = event.get(ControllerEvent.ENDPOINT_ID)
+        target = self._resolve_parquet_target()
+        if target is None or not endpoint_id:
+            logger.warning(
+                "Cannot fence Parquet data, forwarding control event unconfirmed",
+                endpoint_id=endpoint_id,
+                parquet_step_name=self._parquet_step_name,
+            )
+            return False
+
+        try:
+            await asyncio.wait_for(
+                target.flush(endpoint_id), timeout=self._timeout_secs
+            )
+        except TimeoutError:
+            logger.warning(
+                "Timed out flushing Parquet data, forwarding control event unconfirmed",
+                endpoint_id=endpoint_id,
+                timeout_secs=self._timeout_secs,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Failed to flush Parquet data, forwarding control event unconfirmed",
+                endpoint_id=endpoint_id,
+                error=mlrun.errors.err_to_str(exc),
+            )
+            return False
+
+        return True
+
+    def _resolve_parquet_target(self):
+        if self._parquet_target is None:
+            try:
+                self._parquet_target = self.context.root[
+                    self._parquet_step_name
+                ].async_object
+            except (AttributeError, KeyError):
+                return None
+        return self._parquet_target
 
 
 class ProcessEndpointEvent(mlrun.feature_store.steps.MapClass):
