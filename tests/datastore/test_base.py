@@ -18,7 +18,7 @@ import tempfile
 from collections import Counter
 from contextlib import nullcontext as does_not_raise
 from datetime import datetime, timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import fsspec
 import pandas as pd
@@ -530,6 +530,7 @@ _COUNTING_BASE = f"counting://bucket/parquet/key={_COUNTING_UID}"
 _COUNTING_TREE_END = datetime(2026, 9, 28, 11, 30)
 _COUNTING_START = datetime(2026, 9, 28, 11, 0)
 _COUNTING_END = datetime(2026, 9, 28, 11, 59, 59)
+_HOUR_LAYOUT = ["year", "month", "day", "hour"]
 
 
 @pytest.fixture
@@ -552,6 +553,16 @@ def _write_counting_tree(fs, hours: int) -> None:
             f"/year={timestamp.year}/month={timestamp.month:02d}"
             f"/day={timestamp.day:02d}/hour={timestamp.hour:02d}/data.parquet"
         )
+        chunk = pd.DataFrame({"timestamp": [timestamp], "feature": [offset]})
+        with fs.open(path, "wb") as handle:
+            chunk.to_parquet(handle, index=False)
+
+
+def _write_flat_counting_tree(fs, hours: int) -> None:
+    """One parquet file per hour straight under the base, as an unpartitioned write leaves it."""
+    for offset in range(hours):
+        timestamp = _COUNTING_TREE_END - timedelta(hours=offset)
+        path = f"/bucket/parquet/key={_COUNTING_UID}/chunk-{offset}.parquet"
         chunk = pd.DataFrame({"timestamp": [timestamp], "feature": [offset]})
         with fs.open(path, "wb") as handle:
             chunk.to_parquet(handle, index=False)
@@ -778,6 +789,181 @@ def test_unpartitioned_target_reads_back_what_the_write_path_wrote(rundb_mock):
     with tempfile.TemporaryDirectory() as temp_dir:
         target = mlrun.datastore.targets.ParquetTarget(
             path=temp_dir, partitioned=False, time_partitioning_granularity="hour"
+        )
+        feature_set.ingest(source=pd.DataFrame(rows), targets=[target])
+
+        assert not any(name.startswith("year=") for name in os.listdir(temp_dir))
+
+        result = target.as_df(
+            start_time=_COUNTING_START,
+            end_time=_COUNTING_END,
+            time_column="timestamp",
+        )
+
+    assert len(result) == 1
+
+
+@pytest.mark.parametrize(
+    "description, declared",
+    [
+        ("the pruned walk lists a path carrying no partition values", _HOUR_LAYOUT),
+        ("pyarrow filters on levels that are not columns", ["year", "month", "day"]),
+    ],
+)
+def test_a_wrong_declared_layout_reads_what_discovery_reads(
+    counting_fs, description, declared
+):
+    """A layout the store does not have returns the rows discovery returns, not an error."""
+    _write_flat_counting_tree(counting_fs, hours=24)
+
+    expected = _read_counting_tree(counting_fs)
+    result = _read_counting_tree(counting_fs, partitions=declared)
+
+    pd.testing.assert_frame_equal(result, expected)
+    assert len(result) == 1, description
+
+
+def test_a_wrong_declared_layout_is_reported(counting_fs, monkeypatch):
+    """The mismatch surfaces as a warning naming both layouts rather than being absorbed."""
+    _write_flat_counting_tree(counting_fs, hours=24)
+    warn_spy = MagicMock()
+    monkeypatch.setattr(mlrun.utils.logger, "warning", warn_spy)
+
+    _read_counting_tree(counting_fs, partitions=_HOUR_LAYOUT)
+
+    warn_spy.assert_called_once()
+    args, kwargs = warn_spy.call_args
+    assert "partition layout" in args[0]
+    assert kwargs["url"] == _COUNTING_BASE
+    assert kwargs["declared"] == _HOUR_LAYOUT
+    assert kwargs["discovered"] == []
+
+
+def test_a_matching_declared_layout_does_not_fall_back(counting_fs, monkeypatch):
+    """The optimization is intact: a layout the store has is never rediscovered."""
+    _write_counting_tree(counting_fs, hours=24)
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("find_partitions must not be called for a matching layout")
+
+    monkeypatch.setattr(storey.utils, "find_partitions", _fail)
+    warn_spy = MagicMock()
+    monkeypatch.setattr(mlrun.utils.logger, "warning", warn_spy)
+
+    result = _read_counting_tree(counting_fs, partitions=_HOUR_LAYOUT)
+
+    assert len(result) == 1
+    warn_spy.assert_not_called()
+
+
+def test_the_fallback_does_not_loop(counting_fs, monkeypatch):
+    """A read still failing after rediscovery raises instead of rediscovering again."""
+    _write_flat_counting_tree(counting_fs, hours=24)
+    discoveries = []
+
+    def _still_wrong(url, fs):
+        discoveries.append(url)
+        return ["year", "month", "day"], ["year", "month", "day"]
+
+    monkeypatch.setattr(storey.utils, "find_partitions", _still_wrong)
+
+    with pytest.raises(pyarrow.lib.ArrowInvalid, match="No match for FieldRef"):
+        _read_counting_tree(counting_fs, partitions=_HOUR_LAYOUT)
+
+    assert discoveries == [_COUNTING_BASE]
+
+
+def test_a_filter_on_a_column_that_is_not_a_level_is_not_a_mismatch(
+    counting_fs, monkeypatch
+):
+    """A caller's filter over a missing column raises as it did, without a discovery walk."""
+    _write_counting_tree(counting_fs, hours=24)
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("find_partitions must not be called for a filter error")
+
+    monkeypatch.setattr(storey.utils, "find_partitions", _fail)
+
+    reader = mlrun.datastore.base.DataStore._parquet_reader(
+        pd,
+        _COUNTING_BASE,
+        counting_fs,
+        "timestamp",
+        _COUNTING_START,
+        _COUNTING_END,
+        [("no_such_column", "=", 1)],
+        True,
+        _HOUR_LAYOUT,
+    )
+
+    with pytest.raises(pyarrow.lib.ArrowInvalid, match="no_such_column"):
+        reader(_COUNTING_BASE)
+
+
+@pytest.mark.parametrize(
+    "description, exception, expected",
+    [
+        (
+            "the pruned walk reached a path with no partition values",
+            TypeError(
+                "DataStore._is_directory_in_range() missing 1 required positional "
+                "argument: 'year'"
+            ),
+            True,
+        ),
+        (
+            "pyarrow rejected a filter on a declared level",
+            pyarrow.lib.ArrowInvalid(
+                "No match for FieldRef.Name(year) in timestamp: timestamp[ns]"
+            ),
+            True,
+        ),
+        (
+            "pyarrow rejected a filter on a column nobody declared",
+            pyarrow.lib.ArrowInvalid(
+                "No match for FieldRef.Name(no_such_column) in timestamp: timestamp[ns]"
+            ),
+            False,
+        ),
+        (
+            "the file is not a parquet file",
+            pyarrow.lib.ArrowInvalid(
+                "Error creating dataset. Could not read schema from 'year=2026/x.parquet'. "
+                "Is this a 'parquet' file?: Parquet magic bytes not found in footer."
+            ),
+            False,
+        ),
+    ],
+)
+def test_only_a_layout_error_is_a_layout_mismatch(description, exception, expected):
+    """The discriminator separates a wrong layout from a corrupt file or a caller's filter."""
+    assert (
+        mlrun.datastore.base.DataStore._is_partition_layout_mismatch(
+            exception, _HOUR_LAYOUT
+        )
+        is expected
+    ), description
+
+
+def test_a_layout_declared_by_a_target_the_write_path_ignored_still_reads(rundb_mock):
+    """A feature set with no timestamp key is written flat and must read back what it wrote."""
+    rows = [
+        {"key": str(offset), "timestamp": _COUNTING_TREE_END - timedelta(hours=offset)}
+        for offset in range(48)
+    ]
+    feature_set = mlrun.feature_store.FeatureSet(
+        name="declared-but-flat",
+        entities=[mlrun.feature_store.Entity("key")],
+        engine="pandas",
+    )
+    feature_set._run_db = rundb_mock
+    feature_set.reload = Mock()
+    feature_set.save = Mock()
+    feature_set.purge_targets = Mock()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = mlrun.datastore.targets.ParquetTarget(
+            path=temp_dir, partitioned=True, time_partitioning_granularity="hour"
         )
         feature_set.ingest(source=pd.DataFrame(rows), targets=[target])
 

@@ -369,6 +369,10 @@ class DataStore(BaseRemoteClient):
         `partitions` are the partition levels directly below `url`, ordered outermost first,
         as `storey.utils.find_partitions` would report them. When given, the store is not
         walked to discover them.
+
+        A declaration is what the target spec asked for, not what the writer produced, so it can
+        name levels the store does not have. A read that fails that way is retried once against
+        the discovered layout, which costs the walk the declaration was meant to save.
         """
         from storey.utils import find_filters, find_partitions
 
@@ -436,71 +440,117 @@ class DataStore(BaseRemoteClient):
                 )
 
                 try:
-                    if (
-                        optimize_discovery
-                        and partitions_time_attributes
-                        and DataStore._verify_path_partition_level(
-                            urlparse(url).path, known_partitions
-                        )
-                        and (start_time or end_time)
+                    return read_with_layout(
+                        partitions_time_attributes=partitions_time_attributes,
+                        known_partitions=known_partitions,
+                        args=args,
+                        kwargs=kwargs,
+                    )
+                except (pyarrow.lib.ArrowInvalid, TypeError) as ex:
+                    if not supplied_partitions or not (
+                        DataStore._is_partition_layout_mismatch(ex, supplied_partitions)
                     ):
-                        return DataStore._read_partitioned_parquet(
-                            url,
-                            start_time,
-                            end_time,
-                            partitions_time_attributes,
-                            df_module,
-                            file_system,
-                            **kwargs,
-                        )
+                        raise
 
-                    else:
-                        return df_module.read_parquet(*args, **kwargs)
-                except pyarrow.lib.ArrowInvalid as ex:
-                    if not str(ex).startswith(
-                        "Cannot compare timestamp with timezone to timestamp without timezone"
-                    ):
-                        raise ex
-
-                    start_time_inner = None
-                    if start_time:
-                        start_time_inner = start_time.replace(
-                            tzinfo=None if start_time.tzinfo else pytz.utc
-                        )
-
-                    end_time_inner = None
-                    if end_time:
-                        end_time_inner = end_time.replace(
-                            tzinfo=None if end_time.tzinfo else pytz.utc
-                        )
-
+                    partitions_time_attributes, known_partitions = find_partitions(
+                        url, file_system
+                    )
+                    logger.warning(
+                        "Declared parquet partition layout is not the one in the store, "
+                        "reading again with the discovered layout",
+                        url=url,
+                        declared=supplied_partitions,
+                        discovered=known_partitions,
+                    )
+                    # Rebuilding the filters replaces the ones built for the declared layout.
                     set_filters(
                         partitions_time_attributes,
-                        start_time_inner,
-                        end_time_inner,
+                        start_time,
+                        end_time,
                         additional_filters,
                         kwargs,
                     )
-                    if (
-                        optimize_discovery
-                        and partitions_time_attributes
-                        and DataStore._verify_path_partition_level(
-                            urlparse(url).path, known_partitions
-                        )
-                    ):
-                        return DataStore._read_partitioned_parquet(
-                            url,
-                            start_time_inner,
-                            end_time_inner,
-                            partitions_time_attributes,
-                            df_module,
-                            file_system,
-                            **kwargs,
-                        )
-                    else:
-                        return df_module.read_parquet(*args, **kwargs)
+                    return read_with_layout(
+                        partitions_time_attributes=partitions_time_attributes,
+                        known_partitions=known_partitions,
+                        args=args,
+                        kwargs=kwargs,
+                    )
             else:
                 return df_module.read_parquet(*args, **kwargs)
+
+        def read_with_layout(
+            partitions_time_attributes, known_partitions, args, kwargs
+        ):
+            """Read `url` under a given partition layout, with `kwargs["filters"]` already built.
+
+            Reading a tz-aware range off a tz-naive column is retried with the times coerced,
+            which is a property of the data and not of the layout.
+            """
+            try:
+                if (
+                    optimize_discovery
+                    and partitions_time_attributes
+                    and DataStore._verify_path_partition_level(
+                        urlparse(url).path, known_partitions
+                    )
+                    and (start_time or end_time)
+                ):
+                    return DataStore._read_partitioned_parquet(
+                        url,
+                        start_time,
+                        end_time,
+                        partitions_time_attributes,
+                        df_module,
+                        file_system,
+                        **kwargs,
+                    )
+
+                else:
+                    return df_module.read_parquet(*args, **kwargs)
+            except pyarrow.lib.ArrowInvalid as ex:
+                if not str(ex).startswith(
+                    "Cannot compare timestamp with timezone to timestamp without timezone"
+                ):
+                    raise ex
+
+                start_time_inner = None
+                if start_time:
+                    start_time_inner = start_time.replace(
+                        tzinfo=None if start_time.tzinfo else pytz.utc
+                    )
+
+                end_time_inner = None
+                if end_time:
+                    end_time_inner = end_time.replace(
+                        tzinfo=None if end_time.tzinfo else pytz.utc
+                    )
+
+                set_filters(
+                    partitions_time_attributes,
+                    start_time_inner,
+                    end_time_inner,
+                    additional_filters,
+                    kwargs,
+                )
+                if (
+                    optimize_discovery
+                    and partitions_time_attributes
+                    and DataStore._verify_path_partition_level(
+                        urlparse(url).path, known_partitions
+                    )
+                ):
+                    return DataStore._read_partitioned_parquet(
+                        url,
+                        start_time_inner,
+                        end_time_inner,
+                        partitions_time_attributes,
+                        df_module,
+                        file_system,
+                        **kwargs,
+                    )
+                else:
+                    return df_module.read_parquet(*args, **kwargs)
 
         return reader
 
@@ -673,6 +723,29 @@ class DataStore(BaseRemoteClient):
             ):
                 return False
         return True
+
+    @staticmethod
+    def _is_partition_layout_mismatch(
+        exception: Exception, declared_partitions: list[str]
+    ) -> bool:
+        """Whether `exception` reports a read addressing partition levels the store does not have.
+
+        A plain read fails in pyarrow on a filter over a level that is not a column of the
+        dataset, and the pruned walk fails on a listed path that carries no partition values.
+        Neither a corrupt file nor a filter over a column that is not a declared level is a
+        layout mismatch, so both keep raising.
+
+        :param exception:            the exception the read raised
+        :param declared_partitions:  the partition levels the read was told to expect
+        :return: True if the layout is worth rediscovering
+        """
+        message = str(exception)
+        if isinstance(exception, TypeError):
+            return "_is_directory_in_range" in message
+        return any(
+            f"No match for FieldRef.Name({level})" in message
+            for level in declared_partitions
+        )
 
 
 class DataItem:
