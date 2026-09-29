@@ -755,14 +755,25 @@ class ModelEndpoints:
             + f"/key={model_endpoint.metadata.uid}"
         )
 
+        # The path is already scoped to a single key, so the levels below it are the time units
+        # the stream processor writes.
+        time_partitioning_granularity = (
+            mlrun.common.schemas.model_monitoring.PARQUET_TIME_PARTITIONING_GRANULARITY
+        )
         parquet_target = mlrun.datastore.targets.ParquetTarget(
             mlrun.common.schemas.model_monitoring.FileTargetKind.PARQUET,
             parquet_path,
+            time_partitioning_granularity=time_partitioning_granularity,
         )
         driver = mlrun.datastore.targets.get_target_driver(parquet_target, feature_set)
 
         feature_set.set_targets(
-            [mlrun.datastore.targets.ParquetTarget(path=parquet_path)],
+            [
+                mlrun.datastore.targets.ParquetTarget(
+                    path=parquet_path,
+                    time_partitioning_granularity=time_partitioning_granularity,
+                )
+            ],
             with_defaults=False,
         )
         driver.update_resource_status("created")

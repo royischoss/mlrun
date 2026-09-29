@@ -18,7 +18,7 @@ import tempfile
 from collections import Counter
 from contextlib import nullcontext as does_not_raise
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import fsspec
 import pandas as pd
@@ -29,6 +29,8 @@ import storey.utils
 from fsspec.implementations.memory import MemoryFileSystem
 
 import mlrun.datastore
+import mlrun.datastore.targets
+import mlrun.feature_store
 from mlrun import MLRunInvalidArgumentError, new_function
 from mlrun.datastore import KafkaSource
 from mlrun.datastore.azure_blob import AzureBlobStore
@@ -660,3 +662,131 @@ def test_supplied_partitions_on_an_empty_directory(counting_fs):
 
     with pytest.raises(pyarrow.lib.ArrowInvalid):
         _read_counting_tree(counting_fs)
+
+
+@pytest.mark.parametrize(
+    "description, target_kwargs, expected",
+    [
+        (
+            "declared granularity is forwarded",
+            dict(time_partitioning_granularity="hour"),
+            ["year", "month", "day", "hour"],
+        ),
+        (
+            "a coarser granularity yields fewer levels",
+            dict(time_partitioning_granularity="day"),
+            ["year", "month", "day"],
+        ),
+        (
+            "partitioned defaults to True for a directory and must not be guessed from",
+            dict(),
+            None,
+        ),
+        (
+            "extra partition columns add levels that do not map onto the time units",
+            dict(time_partitioning_granularity="hour", partition_cols=["region"]),
+            None,
+        ),
+        (
+            "key bucketing adds a level above the time units",
+            dict(time_partitioning_granularity="hour", key_bucketing_number=0),
+            None,
+        ),
+        (
+            "the storey writer drops the time units when partitioning is off",
+            dict(partitioned=False, time_partitioning_granularity="hour"),
+            None,
+        ),
+    ],
+)
+def test_parquet_target_forwards_only_a_declared_layout(
+    description, target_kwargs, expected
+):
+    target = mlrun.datastore.targets.ParquetTarget(
+        path="counting://bucket/parquet", **target_kwargs
+    )
+    data_item = Mock()
+    data_item.as_df.return_value = pd.DataFrame({"feature": [1]})
+
+    with patch("mlrun.get_dataitem", return_value=data_item):
+        target.as_df(start_time=_COUNTING_START, end_time=_COUNTING_END)
+
+    assert data_item.as_df.call_args.kwargs.get("partitions") == expected, description
+
+
+def test_parquet_target_read_skips_discovery_end_to_end(monkeypatch):
+    """The layout reaches the reader through the whole target chain, not just in isolation.
+
+    Covers ParquetTarget.as_df -> get_dataitem -> DataStore.as_df -> _parquet_reader, which the
+    unit tests above only exercise a link at a time. Row content is asserted against the counting
+    filesystem instead: _reconstruct_path_from_base_url strips the leading slash off a url whose
+    scheme carries no authority, so the partitioned branch addresses file:// paths relative to the
+    working directory and matches nothing.
+    """
+    rows = [
+        {
+            "timestamp": _COUNTING_TREE_END - timedelta(hours=offset),
+            "value": offset,
+        }
+        for offset in range(48)
+    ]
+    df = pd.DataFrame(rows)
+    for unit in ["year", "month", "day", "hour"]:
+        df[unit] = getattr(pd.DatetimeIndex(df["timestamp"]), unit)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        df.to_parquet(
+            temp_dir, partition_cols=["year", "month", "day", "hour"], engine="pyarrow"
+        )
+
+        def _fail(*args, **kwargs):
+            raise AssertionError(
+                "find_partitions must not be called for a declared layout"
+            )
+
+        monkeypatch.setattr(storey.utils, "find_partitions", _fail)
+
+        target = mlrun.datastore.targets.ParquetTarget(
+            path=f"file://{temp_dir}", time_partitioning_granularity="hour"
+        )
+        result = target.as_df(
+            start_time=_COUNTING_START,
+            end_time=_COUNTING_END,
+            time_column="timestamp",
+        )
+
+    # the declared time units are partition columns, not data
+    assert "hour" not in result.columns
+
+
+def test_unpartitioned_target_reads_back_what_the_write_path_wrote(rundb_mock):
+    """A granularity declared alongside partitioned=False is written flat and must read back."""
+    rows = [
+        {"key": str(offset), "timestamp": _COUNTING_TREE_END - timedelta(hours=offset)}
+        for offset in range(48)
+    ]
+    feature_set = mlrun.feature_store.FeatureSet(
+        name="unpartitioned",
+        entities=[mlrun.feature_store.Entity("key")],
+        timestamp_key="timestamp",
+    )
+    feature_set._run_db = rundb_mock
+    feature_set.reload = Mock()
+    feature_set.save = Mock()
+    feature_set.purge_targets = Mock()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = mlrun.datastore.targets.ParquetTarget(
+            path=temp_dir, partitioned=False, time_partitioning_granularity="hour"
+        )
+        feature_set.ingest(source=pd.DataFrame(rows), targets=[target])
+
+        assert not any(name.startswith("year=") for name in os.listdir(temp_dir))
+
+        result = target.as_df(
+            start_time=_COUNTING_START,
+            end_time=_COUNTING_END,
+            time_column="timestamp",
+        )
+
+    assert len(result) == 1

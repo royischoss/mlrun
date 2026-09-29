@@ -596,3 +596,7 @@ INTERSECT_DICT_KEYS = {
 
 CRON_TRIGGER_KINDS = ("http", "cron")
 STREAM_TRIGGER_KINDS = ("v3io-stream", "kafka-cluster")
+
+# The smallest time unit the offline parquet target is partitioned by. Readers of that target
+# rely on it to address partitions without listing the store to discover the layout.
+PARQUET_TIME_PARTITIONING_GRANULARITY = "hour"

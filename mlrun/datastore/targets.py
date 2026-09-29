@@ -1007,6 +1007,23 @@ class ParquetTarget(BaseStoreTarget):
         **kwargs,
     ):
         """return the target data as dataframe"""
+        # A layout needs both flags: `partitioned` defaults to True for any directory, and the
+        # storey writer drops the time units when it is False. Extra partition columns and key
+        # bucketing add levels that do not map onto the time units.
+        if (
+            self.partitioned
+            and self.time_partitioning_granularity
+            and not self.partition_cols
+            and self.key_bucketing_number is None
+            and not self.is_single_file()
+        ):
+            kwargs.setdefault(
+                "partitions",
+                mlrun.utils.helpers.time_partitions_up_to(
+                    self.time_partitioning_granularity
+                ),
+            )
+
         result = mlrun.get_dataitem(self.get_target_path()).as_df(
             columns=columns,
             df_module=df_module,
@@ -1018,22 +1035,25 @@ class ParquetTarget(BaseStoreTarget):
             **kwargs,
         )
         if not columns:
-            drop_cols = []
-            if self.time_partitioning_granularity:
-                for col in mlrun.utils.helpers.LEGAL_TIME_UNITS:
-                    drop_cols.append(col)
-                    if col == self.time_partitioning_granularity:
-                        break
-            elif (
-                self.partitioned
-                and not self.partition_cols
-                and not self.key_bucketing_number
-            ):
-                drop_cols = mlrun.utils.helpers.DEFAULT_TIME_PARTITIONS
+            drop_cols = self._time_partition_levels()
             if drop_cols:
                 # if these columns aren't present for some reason, that's no reason to fail
                 result.drop(columns=drop_cols, inplace=True, errors="ignore")
         return result
+
+    def _time_partition_levels(self) -> list[str]:
+        """The time units this target partitions by, outermost first, empty if none."""
+        if self.time_partitioning_granularity:
+            return mlrun.utils.helpers.time_partitions_up_to(
+                self.time_partitioning_granularity
+            )
+        if (
+            self.partitioned
+            and not self.partition_cols
+            and not self.key_bucketing_number
+        ):
+            return list(mlrun.utils.helpers.DEFAULT_TIME_PARTITIONS)
+        return []
 
     def is_single_file(self):
         return mlrun.utils.helpers.is_parquet_file(self.path)

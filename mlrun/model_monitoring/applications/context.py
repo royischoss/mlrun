@@ -239,6 +239,9 @@ class MonitoringApplicationContext:
                 end_time=self.end_infer_time,
                 time_column=mm_constants.EventFieldType.TIMESTAMP,
                 storage_options=self.storage_options,
+                partitions=mlrun.utils.helpers.time_partitions_up_to(
+                    mm_constants.PARQUET_TIME_PARTITIONING_GRANULARITY
+                ),
             )
             if df.empty:
                 raise mlrun.errors.MLRunEmptySampleDFError(

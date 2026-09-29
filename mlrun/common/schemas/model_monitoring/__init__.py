@@ -14,6 +14,7 @@
 
 from .constants import (
     INTERSECT_DICT_KEYS,
+    PARQUET_TIME_PARTITIONING_GRANULARITY,
     ApplicationEvent,
     DriftStatus,
     EndpointMode,

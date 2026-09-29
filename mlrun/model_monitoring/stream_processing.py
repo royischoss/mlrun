@@ -28,6 +28,7 @@ import mlrun.serving.states
 import mlrun.serving.system_steps
 import mlrun.utils
 from mlrun.common.schemas.model_monitoring.constants import (
+    PARQUET_TIME_PARTITIONING_GRANULARITY,
     ControllerEvent,
     ControllerEventKind,
     EndpointType,
@@ -324,9 +325,17 @@ class EventStreamProcessor:
                 attributes={"infer_columns_from_data": True},
                 index_cols=[EventFieldType.ENDPOINT_ID],
                 key_bucketing_number=0,
-                time_partitioning_granularity="hour",
+                time_partitioning_granularity=PARQUET_TIME_PARTITIONING_GRANULARITY,
                 time_field=EventFieldType.TIMESTAMP,
-                partition_cols=["$key", "$year", "$month", "$day", "$hour"],
+                partition_cols=[
+                    "$key",
+                    *(
+                        f"${time_unit}"
+                        for time_unit in mlrun.utils.helpers.time_partitions_up_to(
+                            PARQUET_TIME_PARTITIONING_GRANULARITY
+                        )
+                    ),
+                ],
             )
 
         apply_parquet_target()
