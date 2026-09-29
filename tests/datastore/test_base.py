@@ -15,13 +15,18 @@
 import os
 import string
 import tempfile
+from collections import Counter
 from contextlib import nullcontext as does_not_raise
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import Mock
 
+import fsspec
 import pandas as pd
+import pyarrow
 import pytest
 import pytz
+import storey.utils
+from fsspec.implementations.memory import MemoryFileSystem
 
 import mlrun.datastore
 from mlrun import MLRunInvalidArgumentError, new_function
@@ -476,3 +481,182 @@ def test_is_directory_in_range(
         start_time, end_time, **partition_args
     )
     assert result == expected, f"Failed case: {description} (tz-aware={with_time_zone})"
+
+
+class _CountingFileSystem(MemoryFileSystem):
+    """In-memory filesystem that tallies the listing calls a read makes.
+
+    Subclasses rather than wraps so it survives the isinstance checks pandas and pyarrow
+    apply, and is cachable under its own protocol so the url-driven read inside
+    `_read_partitioned_parquet` resolves back to this same instance.
+    """
+
+    protocol = "counting"
+    cachable = True
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        if path.startswith("counting://"):
+            path = "memory://" + path[len("counting://") :]
+        return MemoryFileSystem._strip_protocol(path)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.counts = Counter()
+
+    def ls(self, path, detail=True, **kwargs):
+        self.counts["ls"] += 1
+        return super().ls(path, detail=detail, **kwargs)
+
+    def info(self, path, **kwargs):
+        self.counts["info"] += 1
+        return super().info(path, **kwargs)
+
+    def reset(self):
+        self.counts = Counter()
+
+    @property
+    def listing_calls(self):
+        return self.counts["ls"] + self.counts["info"]
+
+
+fsspec.register_implementation("counting", _CountingFileSystem, clobber=True)
+
+_COUNTING_UID = "ffd8dfe0a3b511ee"
+_COUNTING_BASE = f"counting://bucket/parquet/key={_COUNTING_UID}"
+# storey's window is (start, end], so rows are written half past the hour.
+_COUNTING_TREE_END = datetime(2026, 9, 28, 11, 30)
+_COUNTING_START = datetime(2026, 9, 28, 11, 0)
+_COUNTING_END = datetime(2026, 9, 28, 11, 59, 59)
+
+
+@pytest.fixture
+def counting_fs():
+    _CountingFileSystem.clear_instance_cache()
+    fs = fsspec.filesystem("counting")
+    fs.store.clear()
+    fs.pseudo_dirs[:] = [""]
+    yield fs
+    fs.store.clear()
+    _CountingFileSystem.clear_instance_cache()
+
+
+def _write_counting_tree(fs, hours: int) -> None:
+    """One parquet file per hour, laid out as the model-monitoring offline target is."""
+    for offset in range(hours):
+        timestamp = _COUNTING_TREE_END - timedelta(hours=offset)
+        path = (
+            f"/bucket/parquet/key={_COUNTING_UID}"
+            f"/year={timestamp.year}/month={timestamp.month:02d}"
+            f"/day={timestamp.day:02d}/hour={timestamp.hour:02d}/data.parquet"
+        )
+        chunk = pd.DataFrame({"timestamp": [timestamp], "feature": [offset]})
+        with fs.open(path, "wb") as handle:
+            chunk.to_parquet(handle, index=False)
+
+
+def _read_counting_tree(fs, partitions=None, url=_COUNTING_BASE):
+    reader = mlrun.datastore.base.DataStore._parquet_reader(
+        pd,
+        url,
+        fs,
+        "timestamp",
+        _COUNTING_START,
+        _COUNTING_END,
+        None,
+        True,
+        partitions,
+    )
+    fs.reset()
+    return reader(url)
+
+
+def test_supplied_partitions_skip_discovery(counting_fs, monkeypatch):
+    """Supplying the layout returns the same rows without walking the store to find it."""
+    _write_counting_tree(counting_fs, hours=24)
+
+    discovered = _read_counting_tree(counting_fs)
+    discovered_calls = counting_fs.listing_calls
+
+    def _fail(*args, **kwargs):
+        raise AssertionError(
+            "find_partitions must not be called when partitions are given"
+        )
+
+    monkeypatch.setattr(storey.utils, "find_partitions", _fail)
+
+    supplied = _read_counting_tree(
+        counting_fs, partitions=["year", "month", "day", "hour"]
+    )
+    supplied_calls = counting_fs.listing_calls
+
+    pd.testing.assert_frame_equal(supplied, discovered)
+    assert len(supplied) == 1
+    assert supplied_calls < discovered_calls
+
+
+def test_supplied_partitions_cost_does_not_grow_with_the_tree(counting_fs):
+    """Discovery cost stays flat as an endpoint ages, which is the property to protect."""
+    partitions = ["year", "month", "day", "hour"]
+
+    _write_counting_tree(counting_fs, hours=24)
+    _read_counting_tree(counting_fs, partitions=partitions)
+    one_day_calls = counting_fs.listing_calls
+
+    _write_counting_tree(counting_fs, hours=720)
+    result = _read_counting_tree(counting_fs, partitions=partitions)
+    thirty_day_calls = counting_fs.listing_calls
+
+    assert len(result) == 1
+    assert thirty_day_calls == one_day_calls
+
+
+def test_partitions_are_discovered_when_not_supplied(counting_fs, monkeypatch):
+    """The fallback is untouched: without the input the store is still walked."""
+    _write_counting_tree(counting_fs, hours=24)
+    calls = []
+    original = storey.utils.find_partitions
+
+    def _spy(url, fs):
+        calls.append(url)
+        return original(url, fs)
+
+    monkeypatch.setattr(storey.utils, "find_partitions", _spy)
+
+    result = _read_counting_tree(counting_fs)
+
+    assert calls == [_COUNTING_BASE]
+    assert len(result) == 1
+
+
+def test_supplied_partitions_ignored_for_a_single_file(counting_fs):
+    """A single file has no levels below it, so a declared layout must not address any."""
+    _write_counting_tree(counting_fs, hours=24)
+    file_url = f"{_COUNTING_BASE}/year=2026/month=09/day=28/hour=11/data.parquet"
+
+    result = _read_counting_tree(
+        counting_fs, partitions=["year", "month", "day", "hour"], url=file_url
+    )
+
+    pd.testing.assert_frame_equal(
+        result, _read_counting_tree(counting_fs, url=file_url)
+    )
+    assert len(result) == 1
+
+
+def test_supplied_partitions_on_an_empty_directory(counting_fs):
+    """An endpoint with nothing written yet yields an empty frame instead of an arrow error.
+
+    Discovery finds no layout, falls back to a plain read and lets pyarrow fail on the
+    missing time column. With the layout supplied the partitioned read matches nothing and
+    returns empty, which is what MLRunEmptySampleDFError is there to represent.
+    """
+    counting_fs.makedirs(f"/bucket/parquet/key={_COUNTING_UID}", exist_ok=True)
+
+    supplied = _read_counting_tree(
+        counting_fs, partitions=["year", "month", "day", "hour"]
+    )
+    assert supplied.empty
+
+    with pytest.raises(pyarrow.lib.ArrowInvalid):
+        _read_counting_tree(counting_fs)

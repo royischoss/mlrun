@@ -96,6 +96,20 @@ DEFAULT_TIME_PARTITIONS = ["year", "month", "day", "hour"]
 DEFAULT_TIME_PARTITIONING_GRANULARITY = "hour"
 
 
+def time_partitions_up_to(granularity: str) -> list[str]:
+    """The time partition levels written for a granularity, outermost first.
+
+    :param granularity: the smallest time unit partitioned by, one of ``LEGAL_TIME_UNITS``
+    :return:            the ordered time units, e.g. ``["year", "month", "day", "hour"]``
+    """
+    if granularity not in LEGAL_TIME_UNITS:
+        raise mlrun.errors.MLRunInvalidArgumentError(
+            f"time partitioning granularity must be one of {','.join(LEGAL_TIME_UNITS)}, "
+            f"not {granularity}."
+        )
+    return LEGAL_TIME_UNITS[: LEGAL_TIME_UNITS.index(granularity) + 1]
+
+
 class StorePrefix:
     """map mlrun store objects to prefixes"""
 

@@ -362,7 +362,14 @@ class DataStore(BaseRemoteClient):
         end_time,
         additional_filters,
         optimize_discovery,
+        partitions=None,
     ):
+        """Build a parquet reader for `url`.
+
+        `partitions` are the partition levels directly below `url`, ordered outermost first,
+        as `storey.utils.find_partitions` would report them. When given, the store is not
+        walked to discover them.
+        """
         from storey.utils import find_filters, find_partitions
 
         def set_filters(
@@ -400,10 +407,26 @@ class DataStore(BaseRemoteClient):
                 )
 
             if start_time or end_time or additional_filters:
-                partitions_time_attributes, partitions = find_partitions(
-                    url, file_system
+                # A single file has no levels below it, whatever the caller declared.
+                supplied_partitions = (
+                    None if mlrun.utils.helpers.is_parquet_file(url) else partitions
                 )
-                logger.debug("Partitioned parquet read", partitions=partitions)
+                if supplied_partitions:
+                    known_partitions = supplied_partitions
+                    partitions_time_attributes = [
+                        time_unit
+                        for time_unit in mlrun.utils.helpers.LEGAL_TIME_UNITS
+                        if time_unit in known_partitions
+                    ]
+                else:
+                    partitions_time_attributes, known_partitions = find_partitions(
+                        url, file_system
+                    )
+                logger.debug(
+                    "Partitioned parquet read",
+                    partitions=known_partitions,
+                    discovered=not supplied_partitions,
+                )
                 set_filters(
                     partitions_time_attributes,
                     start_time,
@@ -417,7 +440,7 @@ class DataStore(BaseRemoteClient):
                         optimize_discovery
                         and partitions_time_attributes
                         and DataStore._verify_path_partition_level(
-                            urlparse(url).path, partitions
+                            urlparse(url).path, known_partitions
                         )
                         and (start_time or end_time)
                     ):
@@ -462,7 +485,7 @@ class DataStore(BaseRemoteClient):
                         optimize_discovery
                         and partitions_time_attributes
                         and DataStore._verify_path_partition_level(
-                            urlparse(url).path, partitions
+                            urlparse(url).path, known_partitions
                         )
                     ):
                         return DataStore._read_partitioned_parquet(
@@ -501,6 +524,7 @@ class DataStore(BaseRemoteClient):
 
         # Feature flag optimize partition discovery by providing specific partition levels urls to the parquet reader
         optimize_discovery = kwargs.pop("optimize_discovery", True)
+        partitions = kwargs.pop("partitions", None)
 
         if file_url.endswith(".csv") or format == "csv":
             is_csv = True
@@ -564,6 +588,7 @@ class DataStore(BaseRemoteClient):
                 end_time,
                 additional_filters,
                 optimize_discovery,
+                partitions,
             )
 
         elif file_url.endswith(".json") or format == "json":
@@ -839,6 +864,9 @@ class DataItem:
                                     Example: [("Product", "=", "Computer")]
                                     For all supported filters, please see:
                                     https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetDataset.html
+        :param partitions:  optional, parquet only. The partition levels directly below the url,
+                            ordered outermost first, e.g. ["year", "month", "day", "hour"].
+                            Supplying them skips walking the store to discover them.
         """
         df = self._store.as_df(
             self._url,
